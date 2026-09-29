@@ -50,12 +50,16 @@ def selftest() -> int:
 
 
 def _utf8_output() -> None:
-    """Windows 上输出被重定向到文件或管道时默认用系统代码页（如 cp1252），中文会报错；改用 UTF-8。"""
+    """Windows 上输出被重定向到文件、管道或 NUL 时默认用系统代码页（如 cp1252），中文会报错；改用 UTF-8。
+
+    真正的控制台窗口 Python 本来就用 UTF-8 输出，不受影响。
+    （不能用 isatty() 判断：重定向到 NUL 时 isatty() 也是 True。）
+    """
     if sys.platform != "win32":
         return
     for stream in (sys.stdout, sys.stderr):
         try:
-            if stream is not None and not stream.isatty():
+            if stream is not None and (stream.encoding or "").lower().replace("-", "") != "utf8":
                 stream.reconfigure(encoding="utf-8", errors="replace")
         except (AttributeError, OSError, ValueError):
             pass
