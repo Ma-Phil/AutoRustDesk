@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "autorustdesk"
-version = "0.1.0"
+dynamic = ["version"]  # 版本号只在 autorustdesk/__init__.py 里改
 description = "网线直连电脑 B（Ubuntu 20.04），自动组网、离线部署并配置 RustDesk 的一键远控工具"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -19,6 +19,9 @@ dev = ["pytest>=7"]
 
 [project.scripts]
 autorustdesk = "autorustdesk.__main__:main"
+
+[tool.setuptools.dynamic]
+version = {attr = "autorustdesk.__version__"}
 
 [tool.setuptools.packages.find]
 include = ["autorustdesk*"]
