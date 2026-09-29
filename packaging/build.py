@@ -5,15 +5,15 @@
 
 输出：
     Windows：dist/AutoRustDesk-<版本>-windows-x64-setup.exe（需要 Inno Setup 6；没有时输出 zip）
-    macOS：  dist/AutoRustDesk-<版本>-macos-<arm64|x86_64>.dmg
+    macOS：  dist/AutoRustDesk-<版本>-macos-arm64.dmg（发布的只有 Apple 芯片版）
 
 --bundle：电脑 B 的离线部署包，打包进程序里（程序自动使用）。
 --client：电脑 A 用的 RustDesk 官方安装包：Windows 为 rustdesk-<版本>-x86_64.exe，放进程序目录；
-          macOS 为 rustdesk-<版本>-<架构>.dmg，取出其中的 RustDesk.app 放进安装盘。
+          macOS 为 rustdesk-<版本>-aarch64.dmg，取出其中的 RustDesk.app 放进安装盘。
 两者都给出时就是完整离线版，电脑 A 全程不用联网。可以用 packaging/fetch_rustdesk.py 下载官方安装包。
 
---prefer-binary 不能省：cryptography 新版本没有 Intel Mac 的预编译包，从源码编译的版本
-打包后会因为 OpenSSL 库冲突无法加载（打包后的自检会报错）。
+--prefer-binary：只用预编译好的包。在打包机上从源码编译的版本（例如 Intel Mac 上的 cryptography）
+可能和打包进去的库冲突，打包后无法加载（打包后的自检会报错）。
 
 Linux 版请用 packaging/build_linux.sh 和 packaging/linux_packages.py。
 """
@@ -23,6 +23,7 @@ import glob
 import json
 import os
 import platform
+import plistlib
 import shutil
 import subprocess
 import sys
@@ -178,6 +179,8 @@ def verify_dmg(dmg: str, build: str, bundle: str, client: str) -> None:
 
 def build_macos(dist: str, build: str, bundle: str, client: str) -> str:
     app = os.path.join(dist, APP_NAME + ".app")
+    with open(os.path.join(app, "Contents", "Info.plist"), "rb") as f:
+        print("最低 macOS 版本：%s" % plistlib.load(f).get("LSMinimumSystemVersion"), flush=True)
     check_builtin(selftest(os.path.join(app, "Contents", "MacOS", APP_NAME), build), bundle, "")
     # 安装盘：本程序 + RustDesk（可选）+"应用程序"快捷方式，两个都拖进去就装好了
     stage = os.path.join(build, "dmg")

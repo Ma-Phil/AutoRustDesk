@@ -2,6 +2,8 @@
 # PyInstaller 打包配置（Windows / macOS），由 packaging/build.py 调用。
 # Linux 版用 packaging/build_linux.sh。
 import os
+import re
+import subprocess
 import sys
 
 from PyInstaller.utils.hooks import collect_submodules
@@ -42,6 +44,26 @@ if sys.platform == "win32":
 
 coll = COLLECT(*programs, a.binaries, a.datas, name=APP_NAME, upx=False)  # noqa: F821
 
+
+def qt_min_macos() -> str:
+    """打包进去的 Qt 支持的最低 macOS 版本（读 QtCore 的 LC_BUILD_VERSION）。
+
+    写进 Info.plist 后，在更旧的系统上打开时系统会直接提示版本太低，而不是闪退。
+    """
+    import PySide6
+
+    qtcore = os.path.join(os.path.dirname(PySide6.__file__), "Qt", "lib", "QtCore.framework", "QtCore")
+    try:
+        out = subprocess.run(["otool", "-l", qtcore], capture_output=True, text=True, check=True).stdout
+        found = re.findall(r"cmd LC_BUILD_VERSION.*?minos (\d+(?:\.\d+)*)", out, re.S)
+    except (OSError, subprocess.CalledProcessError):
+        found = []
+    if not found:
+        print("警告：读不到 Qt 支持的最低 macOS 版本，按 13.0 处理")
+        return "13.0"
+    return max(found, key=lambda v: tuple(int(x) for x in v.split(".")))
+
+
 if sys.platform == "darwin":
     app = BUNDLE(  # noqa: F821
         coll,
@@ -53,6 +75,6 @@ if sys.platform == "darwin":
             "CFBundleDisplayName": APP_NAME,
             "CFBundleShortVersionString": __version__,
             "NSHighResolutionCapable": True,
-            "LSMinimumSystemVersion": "11.0",
+            "LSMinimumSystemVersion": qt_min_macos(),
         },
     )

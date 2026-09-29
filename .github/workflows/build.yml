@@ -1,10 +1,11 @@
-# 在真实的 Linux / Windows / macOS 上测试，并打包三个系统的完整离线版：
+# 在真实的 Linux / Windows / macOS 上测试，并打包三个系统的完整离线版
+# （Windows x64、Apple 芯片的 Mac、Ubuntu x86_64）：
 #   程序 + 电脑 B 的离线部署包（Ubuntu 20.04/22.04/24.04）+ 电脑 A 用的 RustDesk 客户端，
 #   装好后电脑 A 全程不用联网。
 # 打好的包在每次运行的 Artifacts 里下载；推送 v* 标签时自动创建 Release 草稿（确认后手动发布）。
 #
-# pip 用 --prefer-binary：cryptography 新版本没有 Intel Mac 的预编译包，从源码编译会链接
-# Homebrew 的 OpenSSL，打包后与 Python 自带的 libssl 同名冲突，程序启动即报错。
+# pip 用 --prefer-binary：只用预编译好的包，不在打包机上从源码编译（编译出来的版本可能和
+# 打包进去的系统库冲突）。
 name: 测试与打包
 
 on:
@@ -127,17 +128,9 @@ jobs:
           retention-days: 14
 
   macos:
-    name: macOS 测试与打包（${{ matrix.arch }}）
+    name: macOS 测试与打包（Apple 芯片）
     needs: offline-bundle
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: macos-15
-            arch: arm64
-          - runner: macos-15-intel
-            arch: x86_64
-    runs-on: ${{ matrix.runner }}
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -157,14 +150,14 @@ jobs:
           name: offline-bundle
           path: extras
       - name: 下载 RustDesk 官方 macOS 版（电脑 A 用）
-        run: python packaging/fetch_rustdesk.py "${{ needs.offline-bundle.outputs.rustdesk }}" macos-${{ matrix.arch }} extras
+        run: python packaging/fetch_rustdesk.py "${{ needs.offline-bundle.outputs.rustdesk }}" macos-arm64 extras
         env:
           GITHUB_TOKEN: ${{ github.token }}
       - name: 打包（dmg 安装盘；挂载后从里面运行自检）
         run: python packaging/build.py --bundle extras/*.tar --client extras/rustdesk-*.dmg
       - uses: actions/upload-artifact@v4
         with:
-          name: AutoRustDesk-macos-${{ matrix.arch }}
+          name: AutoRustDesk-macos-arm64
           path: dist/*.dmg
           if-no-files-found: error
           compression-level: 0
@@ -239,8 +232,7 @@ jobs:
             | 电脑 A | 下载 |
             |---|---|
             | Windows 10 / 11 | `AutoRustDesk-*-windows-x64-setup.exe` |
-            | Mac（Apple 芯片） | `AutoRustDesk-*-macos-arm64.dmg`（把两个应用都拖进"应用程序"） |
-            | Mac（Intel） | `AutoRustDesk-*-macos-x86_64.dmg` |
+            | Mac（Apple 芯片，macOS 13 及以上） | `AutoRustDesk-*-macos-arm64.dmg`（把两个应用都拖进"应用程序"） |
             | Ubuntu 20.04 及以上 | `autorustdesk_*_amd64.deb`（`sudo apt install ./文件名`）或 `AutoRustDesk-*-x86_64.AppImage` |
 
             `autorustdesk-bundle-*.tar` 是单独的电脑 B 离线部署包（已经包含在上面的安装包里，升级程序或源码运行时用）。`SHA256SUMS.txt` 为校验和。

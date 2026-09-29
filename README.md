@@ -29,7 +29,7 @@
 
 ![主窗口（示意）](docs/images/main-window.png)
 
-> 电脑 A 支持 **Ubuntu（及其它 Linux 桌面）、Windows 10/11、macOS 11 及以上**。
+> 电脑 A 支持 **Ubuntu（及其它 Linux 桌面）、Windows 10/11、Apple 芯片的 Mac（macOS 13 及以上）**。
 > Windows 和 macOS 版是新加入的：在 GitHub Actions 的真实 Windows / macOS 系统上做了自动化测试，但还没有接真实的电脑 B 验证过，遇到问题欢迎反馈。
 > 需求和设计见 [docs/requirements.md](docs/requirements.md)、[docs/design.md](docs/design.md)。
 
@@ -48,7 +48,7 @@
 
 | | 要求 |
 |---|---|
-| 电脑 A | 以下任一系统，有有线网口或 USB 网卡（RustDesk 客户端在完整离线版里已经带了）：<br>· Ubuntu 20.04 及以上（x86_64）桌面版<br>· Windows 10 / 11（x64），建议安装 [Npcap](https://npcap.com)<br>· macOS 11 及以上（Apple 芯片或 Intel） |
+| 电脑 A | 以下任一系统，有有线网口或 USB 网卡（RustDesk 客户端在完整离线版里已经带了）：<br>· Ubuntu 20.04 及以上（x86_64）桌面版<br>· Windows 10 / 11（x64），建议安装 [Npcap](https://npcap.com)<br>· Apple 芯片（M1 及以后）的 Mac，macOS 13 及以上 |
 | 电脑 B | Ubuntu 20.04 / 22.04 / 24.04 桌面版，x86_64；**已开启 SSH**；有一个可以 sudo 的账号。26.04 只能部分支持，见[常见问题](#常见问题) |
 | 网线 | 普通网线即可（现代网卡自动识别直连/交叉） |
 | 自己制作离线包（可选） | 任意一台能上网的电脑（Linux / Windows / macOS 都可以，只需做一次） |
@@ -69,7 +69,6 @@
 |---|---|---|
 | Windows 10 / 11 | `AutoRustDesk-<版本>-windows-x64-setup.exe` | 双击安装，不需要管理员权限 |
 | Mac（Apple 芯片） | `AutoRustDesk-<版本>-macos-arm64.dmg` | 打开后把 AutoRustDesk 和 RustDesk 都拖进「应用程序」 |
-| Mac（Intel） | `AutoRustDesk-<版本>-macos-x86_64.dmg` | 同上 |
 | Ubuntu 20.04 及以上 | `autorustdesk_<版本>_amd64.deb` | `sudo apt install ./autorustdesk_<版本>_amd64.deb`，然后在应用菜单里打开 |
 | Ubuntu 20.04 及以上 | `AutoRustDesk-<版本>-x86_64.AppImage` | 不用安装：`chmod +x` 后直接运行 |
 
@@ -142,7 +141,7 @@ python3 -m venv .venv
 ```bash
 # 下载 RustDesk 官方安装包（latest 为最新正式版，也可以写版本号）
 python packaging/fetch_rustdesk.py latest deb dl/          # 电脑 B 用的 deb，用来制作离线包
-python packaging/fetch_rustdesk.py latest windows dl/      # 电脑 A 用：windows / macos-arm64 / macos-x86_64 / appimage
+python packaging/fetch_rustdesk.py latest windows dl/      # 电脑 A 用：windows / macos-arm64 / appimage
 
 # Windows / macOS（在对应系统上运行；Windows 需要 Inno Setup 6 才能生成安装程序）
 pip install --prefer-binary -r requirements.txt pyinstaller
@@ -234,9 +233,9 @@ python packaging/build.py                          # 打包 Windows / macOS 版�
 
 每次推送代码，GitHub Actions 会：
 
-1. 在 Linux、Windows、macOS（Apple 芯片和 Intel）上运行测试：Linux 上以 root 跑网络集成测试；macOS 上用 feth 虚拟网卡对当网线，完整走一遍配置、抓包、DHCP、ARP 扫描；Windows 上创建环回网卡，测试 netsh 配置和恢复。
+1. 在 Linux、Windows、macOS（Apple 芯片）上运行测试：Linux 上以 root 跑网络集成测试；macOS 上用 feth 虚拟网卡对当网线，完整走一遍配置、抓包、DHCP、ARP 扫描；Windows 上创建环回网卡，测试 netsh 配置和恢复。
 2. 下载 RustDesk 官方最新正式版，制作电脑 B 的离线部署包（Ubuntu 20.04 / 22.04 / 24.04）。
-3. 打包三个系统的完整离线版：Windows 安装程序、macOS dmg（Apple 芯片和 Intel）、Ubuntu 的 deb 和 AppImage，并在打包后运行自检（deb 在 Ubuntu 20.04 里安装后运行）。
+3. 打包三个系统的完整离线版：Windows x64 安装程序、Apple 芯片 Mac 的 dmg、Ubuntu x86_64 的 deb 和 AppImage。每个包都按用户的用法验证一遍再运行自检：Windows 安装程序静默安装后运行，dmg 挂载后从里面运行，deb 在 Ubuntu 20.04 里安装后运行，AppImage 直接运行。
 
 在 Actions 页面手动运行"测试与打包"时，可以指定打包哪个 RustDesk 版本。
 

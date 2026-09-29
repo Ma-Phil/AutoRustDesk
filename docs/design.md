@@ -223,7 +223,7 @@ autorustdesk-bundle/
 | | 安装包 | 说明 |
 |---|---|---|
 | Windows | Inno Setup 安装程序 | 中文界面（Inno Setup 没带简体中文时用 `packaging/windows/ChineseSimplified.isl`）；默认装在当前用户目录，不需要管理员权限（也可以选择为所有用户安装）；离线包放在安装目录的 `bundle/` 下 |
-| macOS | dmg（arm64、x86_64 各一个） | 离线包在签名前放进 `AutoRustDesk.app/Contents/Resources/bundle/`；dmg 里放本程序、官方的 `RustDesk.app` 和「应用程序」快捷方式 |
+| macOS | dmg（只做 Apple 芯片版；最低 macOS 版本跟着打包进去的 Qt 走，写进 Info.plist，目前为 13） | 离线包在签名前放进 `AutoRustDesk.app/Contents/Resources/bundle/`；dmg 里放本程序、官方的 `RustDesk.app` 和「应用程序」快捷方式 |
 | Ubuntu | deb | 装到 `/opt/autorustdesk`，带应用菜单项、图标、`/usr/bin/autorustdesk`，以及 polkit 策略（授权框显示本程序的说明，授权在一段时间内有效） |
 | Ubuntu | AppImage | 单个文件。以 root 运行网络助手时，pkexec 执行的是 AppImage 文件本身（`$APPIMAGE`）：AppImage 挂载的目录只有当前用户能访问，root 进不去 |
 

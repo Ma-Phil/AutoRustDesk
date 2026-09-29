@@ -3,7 +3,6 @@
     python packaging/fetch_rustdesk.py latest deb 输出目录            # 电脑 B 用的 deb
     python packaging/fetch_rustdesk.py 1.4.2 windows 输出目录         # 电脑 A（Windows）用的 exe
     python packaging/fetch_rustdesk.py latest macos-arm64 输出目录     # Apple 芯片 Mac 的 dmg
-    python packaging/fetch_rustdesk.py latest macos-x86_64 输出目录    # Intel Mac 的 dmg
     python packaging/fetch_rustdesk.py latest appimage 输出目录        # 电脑 A（Linux）用的 AppImage
 
 latest 表示最新的正式版。打印实际下载的版本；加 --github-output 时同时写入 GitHub Actions 的输出。
@@ -23,7 +22,6 @@ KINDS = {
     "deb": r"rustdesk-{v}-x86_64\.deb",
     "windows": r"rustdesk-{v}-x86_64\.exe",
     "macos-arm64": r"rustdesk-{v}-aarch64\.dmg",
-    "macos-x86_64": r"rustdesk-{v}-x86_64\.dmg",
     "appimage": r"rustdesk-{v}-x86_64\.AppImage",
 }
 
