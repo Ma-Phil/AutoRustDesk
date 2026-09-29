@@ -19,6 +19,8 @@ from tests.integration.netns import DirectLink, available
 pytestmark = pytest.mark.skipif(not available(), reason="需要 root 和网络命名空间")
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+DHCLIENT_PID = "/run/dhclient-ard-test.pid"
+DHCLIENT_LEASES = "/var/lib/dhcp/dhclient.ard-test.leases"
 
 
 def ipv6_supported():
@@ -146,8 +148,10 @@ def test_dhcp_lease_and_ipv6_discovery(packetio):
             assert r["ok"], r
 
             b_mac = link.b_mac()
-            dh = link.b_popen("dhclient", "-d", "-v", "-1", "-pf", "/tmp/ard-dhclient.pid",
-                              "-lf", "/tmp/ard-dhclient.leases", link.b_if)
+            # 用 AppArmor 的 dhclient 配置允许的路径（Ubuntu 上 /tmp 下的文件会被拒绝）
+            os.makedirs("/var/lib/dhcp", exist_ok=True)
+            dh = link.b_popen("dhclient", "-d", "-v", "-1", "-pf", DHCLIENT_PID,
+                              "-lf", DHCLIENT_LEASES, link.b_if)
             try:
                 lease = h.wait_event(lambda e: e["event"] == "lease", timeout=40)
                 assert lease["mac"] == b_mac
@@ -175,7 +179,10 @@ def test_dhcp_lease_and_ipv6_discovery(packetio):
                 assert neigh["mac"] == b_mac
             finally:
                 dh.kill()
-                link.b("dhclient", "-x", "-pf", "/tmp/ard-dhclient.pid", check=False)
+                link.b("dhclient", "-x", "-pf", DHCLIENT_PID, check=False)
+                for f in (DHCLIENT_PID, DHCLIENT_LEASES):
+                    if os.path.exists(f):
+                        os.remove(f)
         finally:
             h.close()
         # 助手退出后 A 的网卡恢复原状
