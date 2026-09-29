@@ -46,22 +46,44 @@ coll = COLLECT(*programs, a.binaries, a.datas, name=APP_NAME, upx=False)  # noqa
 
 
 def qt_min_macos() -> str:
-    """打包进去的 Qt 支持的最低 macOS 版本（读 QtCore 的 LC_BUILD_VERSION）。
+    """打包进去的 Qt 支持的最低 macOS 版本。
 
     写进 Info.plist 后，在更旧的系统上打开时系统会直接提示版本太低，而不是闪退。
+    先读 QtCore 本身的 LC_BUILD_VERSION；读不到时看 PySide6 安装包标注的系统版本（如 macosx_13_0）。
     """
+    import glob
+    from importlib import metadata
+
     import PySide6
 
-    qtcore = os.path.join(os.path.dirname(PySide6.__file__), "Qt", "lib", "QtCore.framework", "QtCore")
-    try:
-        out = subprocess.run(["otool", "-l", qtcore], capture_output=True, text=True, check=True).stdout
-        found = re.findall(r"cmd LC_BUILD_VERSION.*?minos (\d+(?:\.\d+)*)", out, re.S)
-    except (OSError, subprocess.CalledProcessError):
-        found = []
-    if not found:
-        print("警告：读不到 Qt 支持的最低 macOS 版本，按 13.0 处理")
-        return "13.0"
-    return max(found, key=lambda v: tuple(int(x) for x in v.split(".")))
+    def newest(versions):
+        return max(versions, key=lambda v: tuple(int(x) for x in v.split(".")))
+
+    framework = os.path.join(os.path.dirname(PySide6.__file__), "Qt", "lib", "QtCore.framework")
+    found = []
+    for binary in glob.glob(os.path.join(framework, "**", "QtCore"), recursive=True):
+        if "Headers" in binary or not os.path.isfile(binary):
+            continue
+        try:
+            out = subprocess.run(["otool", "-l", binary], capture_output=True, text=True, check=True).stdout
+        except (OSError, subprocess.CalledProcessError) as e:
+            print("otool 读取 %s 失败：%s" % (binary, e))
+            continue
+        found += re.findall(r"cmd LC_BUILD_VERSION.*?minos (\d+(?:\.\d+)*)", out, re.S)
+    if found:
+        print("Qt 支持的最低 macOS 版本（QtCore）：%s" % newest(found))
+        return newest(found)
+    for dist in ("PySide6_Essentials", "PySide6", "shiboken6"):
+        try:
+            wheel = metadata.distribution(dist).read_text("WHEEL") or ""
+        except metadata.PackageNotFoundError:
+            continue
+        found += ["%s.%s" % m for m in re.findall(r"macosx_(\d+)_(\d+)_", wheel)]
+    if found:
+        print("Qt 支持的最低 macOS 版本（PySide6 安装包）：%s" % newest(found))
+        return newest(found)
+    print("警告：读不到 Qt 支持的最低 macOS 版本，按 13.0 处理")
+    return "13.0"
 
 
 if sys.platform == "darwin":
