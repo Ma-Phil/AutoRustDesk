@@ -11,6 +11,7 @@ import posixpath
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -18,8 +19,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from ..bundle import RELEASES, Bundle, BundleError, release_label
 from ..debian import version_compare
-from ..helper.linkconfig import PROFILE_PREFIX
-from ..helper.linkconfig import STATE_FILE as STALE_STATE_FILE
+from ..helper.state import STATE_FILE as STALE_STATE_FILE
 from . import nic as nicmod
 from . import rustdesk_local
 from .devices import DeviceRegistry, generate_password, now_str
@@ -41,6 +41,11 @@ STEP_TITLES = dict(STEPS)
 
 PENDING, RUNNING, DONE, SKIPPED, FAILED, WARNING = (
     "pending", "running", "done", "skipped", "failed", "warning")
+
+# Linux 上网络助手创建的 NetworkManager 连接配置名的前缀（与 helper/linkconfig.py 一致）
+PROFILE_PREFIX = "AutoRustDesk-"
+NPCAP_HINT = ("本机没有安装 Npcap，只能通过 DHCP 和 IPv6 发现电脑 B；B 用固定 IP 且关闭了 IPv6 时会找不到。"
+              "建议安装 Npcap（https://npcap.com）")
 
 
 class WorkflowError(Exception):
@@ -198,11 +203,11 @@ def stale_network_config() -> List[str]:
     """上次异常退出后遗留在本机的网络配置（普通用户也能读到）。"""
     found: List[str] = []
     try:
-        with open(STALE_STATE_FILE) as f:
+        with open(STALE_STATE_FILE, encoding="utf-8") as f:
             found.extend(json.load(f).keys())
-    except (OSError, ValueError):
+    except (OSError, ValueError, AttributeError):
         pass
-    if shutil.which("nmcli"):
+    if sys.platform.startswith("linux") and shutil.which("nmcli"):
         try:
             out = subprocess.run(["nmcli", "-t", "-f", "NAME", "connection", "show"],
                                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=10).stdout
@@ -245,6 +250,7 @@ class Workflow:
         self._lock = threading.Lock()
         # 网络状态（多次运行之间保留，直到恢复网络）
         self.iface = ""
+        self.scope = ""  # 访问 B 的 fe80:: 地址时 % 后面的部分
         self.net: Optional[ipaddress.IPv4Network] = None
         self.a_ip = ""
         self.dhcp_enabled = False
@@ -384,7 +390,7 @@ class Workflow:
             except HelperError:
                 pass
             self.helper.stop()
-        self.iface = ""
+        self.iface = self.scope = ""
         self.net = None
         self.discovery.reset()
 
@@ -418,7 +424,7 @@ class Workflow:
 
         self.helper.start()
         used = []
-        for name, cidrs in nicmod._ip_addresses().items():
+        for name, cidrs in nicmod.ipv4_by_iface().items():
             if name != iface:
                 used.extend(cidrs)
         net = choose_subnet(s.subnet, used)
@@ -430,7 +436,13 @@ class Workflow:
         self.discovery.reset()
         res = self.helper.call("link_up", iface=iface, cidr=str(a_cidr), timeout=90)
         self.iface, self.net, self.a_ip = iface, net, str(a_cidr.ip)
+        self.scope = str(res.get("scope") or iface)
+        if res.get("capture") == "none":
+            self.ui.log(NPCAP_HINT, "warning")
         self.helper.call("sniff_start", iface=iface)
+        if res.get("foreign_dhcp"):
+            # 配置之前网卡就从别的 DHCP 服务器拿到了地址（网关也通），插的多半是局域网
+            self.discovery.foreign_dhcp = True
         self.ui.log("观察链路 2 秒，确认是直连而不是局域网……")
         self._sleep(2)
         others = [c for c in self.discovery.snapshot()]
@@ -447,7 +459,8 @@ class Workflow:
                              pool_start=pool[0], pool_end=pool[1], lease_time=s.lease_time,
                              reservations=self.registry.reservations(net))
             self.dhcp_enabled = True
-        backend = {"networkmanager": "NetworkManager", "iproute2": "ip 命令"}.get(res.get("backend"), "")
+        backend = {"networkmanager": "NetworkManager", "iproute2": "ip 命令", "ifconfig": "ifconfig",
+                   "netsh": "netsh"}.get(res.get("backend"), "")
         return "%s = %s（%s）" % (iface, a_cidr, backend)
 
     # ------------------------------------------------------------------ 2 发现
@@ -568,7 +581,7 @@ class Workflow:
         if direct and tcp_open(direct, port, 1):
             return direct
         for ll in sorted(c.ipv6ll):
-            host = "%s%%%s" % (ll, self.iface)
+            host = "%s%%%s" % (ll, self.scope or self.iface)
             if tcp_open(host, port, 1):
                 return host
         static = sorted(ip for ip in c.ipv4 if self.net is None or ipaddress.ip_address(ip) not in self.net)

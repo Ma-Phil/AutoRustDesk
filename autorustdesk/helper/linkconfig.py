@@ -6,7 +6,7 @@
 - 其它情况：直接用 ip 命令加地址，结束时删掉。
 - ufw 启用时临时放行该网卡上的 DHCP 请求（UDP 67）。
 
-所做的修改记录在 /run/autorustdesk/links.json，助手异常退出后可以 cleanup。
+所做的修改记录在 /run/autorustdesk/links.json（见 state.py），助手异常退出后可以 cleanup。
 """
 
 import array
@@ -21,8 +21,12 @@ import subprocess
 import time
 from typing import Callable, Dict, List, Optional, Tuple
 
-STATE_DIR = "/run/autorustdesk"
-STATE_FILE = os.path.join(STATE_DIR, "links.json")
+from . import state as _state
+from .backend import Link
+
+STATE_DIR = _state.STATE_DIR
+STATE_FILE = _state.STATE_FILE
+
 PROFILE_PREFIX = "AutoRustDesk-"
 
 LogFn = Callable[[str], None]
@@ -149,6 +153,11 @@ def nm_device_state(iface: str) -> str:
     return ""
 
 
+def nm_has_dhcp_lease(iface: str) -> bool:
+    rc, out = run(["nmcli", "-g", "DHCP4.OPTION", "device", "show", iface])
+    return rc == 0 and "dhcp_server_identifier" in out
+
+
 def ufw_active() -> bool:
     if not shutil.which("ufw"):
         return False
@@ -157,22 +166,14 @@ def ufw_active() -> bool:
 
 
 def _load_state() -> Dict:
-    try:
-        with open(STATE_FILE) as f:
-            return json.load(f)
-    except (OSError, ValueError):
-        return {}
+    return _state.load_state(STATE_FILE)
 
 
 def _save_state(state: Dict) -> None:
-    os.makedirs(STATE_DIR, exist_ok=True)
-    tmp = STATE_FILE + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(state, f)
-    os.replace(tmp, STATE_FILE)
+    _state.save_state(state, STATE_FILE)
 
 
-class LinkConfigurator:
+class LinkConfigurator(Link):
     def __init__(self, iface: str, log: LogFn):
         if not iface_exists(iface):
             raise LinkError("网卡不存在：%s" % iface)
@@ -216,7 +217,10 @@ class LinkConfigurator:
             run(["ip", "link", "set", self.iface, "up"])
         self._enable_ipv6()
         self.primary = str(want)
-        if nm_running() and nm_device_state(self.iface) not in ("", "unmanaged"):
+        use_nm = nm_running() and nm_device_state(self.iface) not in ("", "unmanaged")
+        # 改配置之前看一眼：网卡已经从别的 DHCP 服务器拿到了地址，说明插的是局域网
+        foreign = use_nm and nm_has_dhcp_lease(self.iface)
+        if use_nm:
             self._nm_up(str(want))
         else:
             self._ip_up(str(want))
@@ -224,7 +228,8 @@ class LinkConfigurator:
         self._record()
         addrs = iface_addresses(self.iface)
         return {"backend": self.backend, "cidr": str(want), "mac": iface_mac(self.iface),
-                "addresses": addrs, "carrier": read_sys(self.iface, "carrier") == "1"}
+                "addresses": addrs, "carrier": read_sys(self.iface, "carrier") == "1",
+                "foreign_dhcp": foreign}
 
     def _enable_ipv6(self) -> None:
         path = "/proc/sys/net/ipv6/conf/%s/disable_ipv6" % self.iface

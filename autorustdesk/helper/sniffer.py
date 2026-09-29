@@ -1,7 +1,10 @@
-"""被动监听直连链路（Linux AF_PACKET），找出对端设备的 MAC 和地址。
+"""被动监听直连链路，找出对端设备的 MAC 和地址。
 
 B 插上网线后通常会发出 ARP、DHCP、IPv6 邻居发现、mDNS 等报文，
 从源地址就能知道 B 的 MAC、固定 IPv4、IPv6 链路本地地址和主机名。
+
+抓包方式见 packetio（Linux AF_PACKET，macOS/Windows libpcap）。Windows 没装 Npcap
+时无法抓包，改为定时读取系统的邻居表（NeighborPoller）。
 """
 
 import ipaddress
@@ -11,8 +14,8 @@ import threading
 import time
 from typing import Callable, Dict, Iterable, List, Optional, Set
 
-ETH_P_ALL = 0x0003
-PACKET_OUTGOING = 4
+from .packetio import PacketIO, PacketIOError
+
 ETH_ARP = 0x0806
 ETH_IPV4 = 0x0800
 ETH_IPV6 = 0x86DD
@@ -157,29 +160,32 @@ class NeighborTable:
 
 
 class LinkSniffer:
-    def __init__(self, iface: str, table: NeighborTable):
-        self.iface = iface
+    """在后台线程里抓包并交给 NeighborTable。抓包出错（例如网卡被停用又启用）时自动重新打开。"""
+
+    def __init__(self, open_io: Callable[[], PacketIO], table: NeighborTable, name: str = ""):
+        self.open_io = open_io
         self.table = table
-        self._sock: Optional[socket.socket] = None
+        self.name = name
+        self.kind = ""
+        self._io: Optional[PacketIO] = None
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
 
     def start(self) -> None:
-        s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(ETH_P_ALL))
-        s.bind((self.iface, 0))
-        s.settimeout(0.5)
-        self._sock = s
+        """打开抓包（失败时抛出 PacketIOError）并开始监听。"""
+        self._io = self.open_io()
+        self.kind = self._io.kind
         self._stop.clear()
-        self._thread = threading.Thread(target=self._loop, name="sniff-%s" % self.iface, daemon=True)
+        self._thread = threading.Thread(target=self._loop, name="sniff-%s" % self.name, daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=3)
-        if self._sock:
-            self._sock.close()
-        self._sock = None
+        if self._io:
+            self._io.close()
+        self._io = None
         self._thread = None
 
     @property
@@ -187,19 +193,87 @@ class LinkSniffer:
         return self._thread is not None and self._thread.is_alive()
 
     def _loop(self) -> None:
-        assert self._sock is not None
+        errors = 0
         while not self._stop.is_set():
+            io = self._io
+            if io is None:
+                try:
+                    io = self._io = self.open_io()
+                except PacketIOError:
+                    self._stop.wait(1.0)
+                    continue
             try:
-                frame, addr = self._sock.recvfrom(65535)
-            except socket.timeout:
-                continue
-            except OSError:
+                frame = io.recv(0.5)
+            except PacketIOError:
                 if self._stop.is_set():
                     break
-                time.sleep(0.2)
+                errors += 1
+                if errors >= 3:
+                    # 连续出错：网卡可能被重置过，关掉重新打开
+                    io.close()
+                    self._io = None
+                    errors = 0
+                self._stop.wait(0.3)
                 continue
-            if len(addr) > 2 and addr[2] == PACKET_OUTGOING:
+            errors = 0
+            if frame:
+                info = parse_frame(frame)
+                if info:
+                    self.table.feed(info)
+
+
+class NeighborPoller:
+    """不能抓包时（Windows 没装 Npcap）的替代：定时读取系统邻居表（ARP/NDP 缓存）。
+
+    B 通过 DHCP 拿地址、回应 IPv6 探测或者被 SendARP 探测到后，都会出现在邻居表里。
+    list_fn 返回 [{"mac": ..., "ip": ...}, ...]。
+    """
+
+    kind = "neighbor-table"
+
+    def __init__(self, list_fn: Callable[[], List[Dict]], table: NeighborTable, interval: float = 1.0):
+        self.list_fn = list_fn
+        self.table = table
+        self.interval = interval
+        self._thread: Optional[threading.Thread] = None
+        self._stop = threading.Event()
+
+    def start(self) -> None:
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._loop, name="neighbors", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=3)
+        self._thread = None
+
+    @property
+    def running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    def poll_once(self) -> None:
+        for entry in self.list_fn():
+            info: Dict = {"mac": entry["mac"]}
+            try:
+                ip = ipaddress.ip_address(entry["ip"].split("%")[0])
+            except ValueError:
                 continue
-            info = parse_frame(frame)
-            if info:
-                self.table.feed(info)
+            if ip.is_multicast or ip.is_unspecified:
+                continue
+            if ip.version == 4:
+                info["ipv4"] = str(ip)
+            elif ip.is_link_local:
+                info["ipv6ll"] = str(ip)
+            else:
+                info["ipv6"] = str(ip)
+            self.table.feed(info)
+
+    def _loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                self.poll_once()
+            except Exception:  # noqa: BLE001 - 读邻居表失败时下次再试
+                pass
+            self._stop.wait(self.interval)

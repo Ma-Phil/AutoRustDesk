@@ -5,7 +5,10 @@ import sys
 
 
 def config_dir() -> str:
-    if sys.platform == "win32":
+    override = os.environ.get("AUTORUSTDESK_CONFIG_DIR")
+    if override:
+        d = override
+    elif sys.platform == "win32":
         base = os.environ.get("APPDATA") or os.path.expanduser("~")
         d = os.path.join(base, "AutoRustDesk")
     elif sys.platform == "darwin":

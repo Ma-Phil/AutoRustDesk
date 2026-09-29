@@ -1,15 +1,19 @@
-"""主动 ARP 扫描（Linux AF_PACKET）。
+"""主动 ARP 扫描。
 
 B 已经有地址、又不发任何报文时，被动监听听不到它；向候选地址逐个发 ARP 请求，
 B 会回应，回应由 sniffer 捕获。对不在本机网段的地址用 ARP 探测（发送方 IP 为
 0.0.0.0），Linux 同样会回应。
+
+报文通过 packetio 发出；Windows 没装 Npcap 时退而用系统的 SendARP，只能扫本机网段。
 """
 
 import ipaddress
 import socket
 import struct
 import time
-from typing import Iterable, List
+from typing import Iterable, List, Optional
+
+from .packetio import PacketIO
 
 ETH_ARP = 0x0806
 
@@ -45,26 +49,29 @@ def build_request(src_mac: bytes, src_ip: str, target_ip: str) -> bytes:
     return eth + arp
 
 
-def arp_scan(iface: str, src_mac: str, own_cidrs: Iterable[str], targets: List[str],
+def sender_for(target: str, own_cidrs: Iterable[str]) -> Optional[str]:
+    """目标在本机某个网段内时返回本机在该网段的地址，否则返回 None。"""
+    ip = ipaddress.ip_address(target)
+    for c in own_cidrs:
+        o = ipaddress.ip_interface(c)
+        if ip in o.network and ip != o.ip:
+            return str(o.ip)
+    return None
+
+
+def arp_scan(io: PacketIO, src_mac: str, own_cidrs: Iterable[str], targets: List[str],
              pps: int = 2000) -> int:
     """对 targets 逐个发 ARP 请求；目标在本机网段内时用本机地址做发送方，否则用 0.0.0.0。"""
     mac = bytes(int(x, 16) for x in src_mac.split(":"))
-    own = [ipaddress.ip_interface(c) for c in own_cidrs]
-    s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(ETH_ARP))
-    try:
-        s.bind((iface, ETH_ARP))
-        interval = 1.0 / max(pps, 1)
-        sent = 0
-        for t in targets:
-            ip = ipaddress.ip_address(t)
-            sender = "0.0.0.0"
-            for o in own:
-                if ip in o.network and ip != o.ip:
-                    sender = str(o.ip)
-                    break
-            s.send(build_request(mac, sender, t))
-            sent += 1
-            time.sleep(interval)
-        return sent
-    finally:
-        s.close()
+    own = list(own_cidrs)
+    start = time.monotonic()
+    rate = float(max(pps, 1))
+    sent = 0
+    for t in targets:
+        io.send(build_request(mac, sender_for(t, own) or "0.0.0.0", t))
+        sent += 1
+        # 按时间表发送：Windows 上 sleep 精度只有毫秒级，逐个 sleep 会慢很多
+        ahead = start + sent / rate - time.monotonic()
+        if ahead > 0.002:
+            time.sleep(ahead)
+    return sent

@@ -11,3 +11,4 @@ dist/
 *.part
 .venv-build/
 *.spec
+!packaging/AutoRustDesk.spec

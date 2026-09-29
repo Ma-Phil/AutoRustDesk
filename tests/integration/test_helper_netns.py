@@ -31,23 +31,50 @@ def ipv6_supported():
         return False
 
 
+def pcap_available():
+    from autorustdesk.helper.packetio import libpcap
+
+    return libpcap() is not None
+
+
+# afpacket：Linux 的默认实现；pcap：macOS/Windows 用的 libpcap 实现；
+# none：不能抓包（模拟 Windows 没装 Npcap），靠 DHCP 记录、系统邻居表发现 B
+CAPTURE_MODES = [
+    "afpacket",
+    pytest.param("pcap", marks=pytest.mark.skipif(not pcap_available(), reason="需要 libpcap")),
+    "none",
+]
+
+
 class HelperProc:
-    def __init__(self):
-        self.p = subprocess.Popen(
-            [sys.executable, os.path.join(ROOT, "autorustdesk", "helper", "__main__.py")],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"},  # 模拟 pkexec 的干净环境
-        )
+    def __init__(self, packetio="afpacket", transport="stdio"):
+        from autorustdesk.helper.transport import Listener
+
+        env = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"}  # 模拟 pkexec 的干净环境
+        if packetio != "afpacket":
+            env["AUTORUSTDESK_PACKETIO"] = packetio
+        cmd = [sys.executable, os.path.join(ROOT, "autorustdesk", "helper", "__main__.py")]
+        self.listener = None
+        if transport == "tcp":
+            # macOS/Windows 的方式：助手连回界面监听的本机端口
+            self.listener = Listener()
+            cmd += ["--connect", self.listener.address, "--token-file", self.listener.token_file]
+        self.p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, env=env)
         self.q = queue.Queue()
         self.events = []
         self.responses = {}
         self.next_id = 0
-        threading.Thread(target=self._reader, daemon=True).start()
+        if self.listener:
+            self.conn, reader = self.listener.accept(20, lambda: self.p.poll() is None)
+        else:
+            reader = self.p.stdout
+        threading.Thread(target=self._reader, args=(reader,), daemon=True).start()
         msg = self.q.get(timeout=10)
         assert msg["type"] == "ready", msg
 
-    def _reader(self):
-        for line in self.p.stdout:
+    def _reader(self, reader):
+        for line in reader:
             msg = json.loads(line)
             if msg["type"] == "response":
                 self.responses[msg["id"]] = msg
@@ -55,11 +82,17 @@ class HelperProc:
                 self.events.append(msg)
             self.q.put(msg)
 
+    def _write(self, data):
+        if self.listener:
+            self.conn.sendall(data)
+        else:
+            self.p.stdin.write(data)
+            self.p.stdin.flush()
+
     def call(self, cmd, timeout=30, **kw):
         self.next_id += 1
         rid = self.next_id
-        self.p.stdin.write((json.dumps(dict(kw, id=rid, cmd=cmd)) + "\n").encode())
-        self.p.stdin.flush()
+        self._write((json.dumps(dict(kw, id=rid, cmd=cmd)) + "\n").encode())
         deadline = time.time() + timeout
         while time.time() < deadline:
             if rid in self.responses:
@@ -77,8 +110,16 @@ class HelperProc:
         raise TimeoutError("没有等到事件；已有事件：%s" % self.events)
 
     def close(self):
-        self.p.stdin.close()
-        self.p.wait(timeout=10)
+        if self.listener:
+            import socket
+
+            self.conn.shutdown(socket.SHUT_WR)
+            self.p.wait(timeout=10)
+            self.conn.close()
+            self.listener.close()
+        else:
+            self.p.stdin.close()
+            self.p.wait(timeout=10)
 
 
 def a_addresses(iface):
@@ -87,15 +128,19 @@ def a_addresses(iface):
 
 
 @pytest.mark.skipif(not shutil.which("dhclient"), reason="需要 isc-dhcp-client")
-def test_dhcp_lease_and_ipv6_discovery():
+@pytest.mark.parametrize("packetio", CAPTURE_MODES)
+def test_dhcp_lease_and_ipv6_discovery(packetio):
     with DirectLink() as link:
-        h = HelperProc()
+        h = HelperProc(packetio)
         try:
             r = h.call("link_up", iface=link.a_if, cidr="192.168.77.1/24")
             assert r["ok"], r
             assert r["result"]["backend"] == "iproute2"
+            assert r["result"]["scope"] == link.a_if
+            assert r["result"]["capture"] == {"none": "none"}.get(packetio, packetio)
             assert "192.168.77.1" in a_addresses(link.a_if)
-            assert h.call("sniff_start", iface=link.a_if)["ok"]
+            r = h.call("sniff_start", iface=link.a_if)
+            assert r["ok"] and r["result"]["capture"] == {"none": "none"}.get(packetio, packetio), r
             r = h.call("dhcp_start", iface=link.a_if, server_ip="192.168.77.1", prefix=24,
                        pool_start="192.168.77.100", pool_end="192.168.77.199", lease_time=600)
             assert r["ok"], r
@@ -117,12 +162,12 @@ def test_dhcp_lease_and_ipv6_discovery():
                                stdout=subprocess.DEVNULL)
 
                 r = h.call("probe6", iface=link.a_if, timeout=2)
-                if ipv6_supported():
+                if ipv6_supported() and packetio != "none":
                     # 发出即返回，B 的回应由链路监听上报
                     assert r["ok"] and r["result"]["sent"] == 2, r
                     neigh = h.wait_event(lambda e: e["event"] == "neighbor" and e["ipv6ll"], timeout=10)
                     assert neigh["mac"] == b_mac
-                else:
+                elif not ipv6_supported():
                     # 内核不支持 IPv6 时只返回错误，不影响助手继续工作
                     assert not r["ok"]
                     assert h.call("leases")["ok"]
@@ -137,10 +182,11 @@ def test_dhcp_lease_and_ipv6_discovery():
         assert "192.168.77.1" not in a_addresses(link.a_if)
 
 
-def test_static_b_is_seen_by_sniffer_and_foreign_dhcp_blocks():
+@pytest.mark.parametrize("packetio", CAPTURE_MODES[:2])
+def test_static_b_is_seen_by_sniffer_and_foreign_dhcp_blocks(packetio):
     with DirectLink() as link:
         link.b("ip", "addr", "add", "10.9.8.7/24", "dev", link.b_if)
-        h = HelperProc()
+        h = HelperProc(packetio)
         try:
             assert h.call("link_up", iface=link.a_if, cidr="192.168.77.1/24")["ok"]
             assert h.call("sniff_start", iface=link.a_if)["ok"]
@@ -209,3 +255,66 @@ def test_bounce_link_makes_b_see_cable_replug():
             assert not [e for e in h.events if e["event"] == "carrier"], h.events
         finally:
             h.close()
+
+
+@pytest.mark.parametrize("packetio", CAPTURE_MODES)
+def test_arp_scan_finds_silent_static_b(packetio):
+    """B 有固定地址但一声不吭：主动 ARP 扫描把它找出来。"""
+    with DirectLink() as link:
+        link.b("ip", "addr", "add", "192.168.77.50/24", "dev", link.b_if)
+        link.b("ip", "addr", "add", "10.0.0.9/24", "dev", link.b_if)
+        b_mac = link.b_mac()
+        h = HelperProc(packetio)
+        try:
+            assert h.call("link_up", iface=link.a_if, cidr="192.168.77.1/24")["ok"]
+            assert h.call("sniff_start", iface=link.a_if)["ok"]
+            r = h.call("arp_scan", iface=link.a_if, targets=["192.168.77.0/24"], timeout=60)
+            assert r["ok"], r
+            if packetio == "none":
+                # 只能用系统接口逐个解析本网段地址，在后台进行
+                assert r["result"]["sent"] == 253
+            neigh = h.wait_event(lambda e: e["event"] == "neighbor" and "192.168.77.50" in e["ipv4"],
+                                 timeout=60)
+            assert neigh["mac"] == b_mac
+            r = h.call("arp_scan", iface=link.a_if, common=True, pps=4000, timeout=60)
+            assert r["ok"], r
+            if packetio == "none":
+                # 不能发 ARP 探测，常见网段扫描做不了，但不报错
+                assert r["result"]["sent"] == 0
+            else:
+                # 不在本机网段的地址用 ARP 探测（发送方 0.0.0.0），B 同样回应
+                h.wait_event(lambda e: e["event"] == "neighbor" and "10.0.0.9" in e["ipv4"], timeout=10)
+        finally:
+            h.close()
+
+
+def test_connect_back_transport():
+    """macOS/Windows 的通信方式：助手连回界面监听的端口，双方用令牌验证；断开后助手恢复网卡并退出。"""
+    with DirectLink() as link:
+        h = HelperProc(transport="tcp")
+        r = h.call("hello")
+        assert r["ok"] and r["result"]["admin"] is True, r
+        assert h.call("link_up", iface=link.a_if, cidr="192.168.77.1/24")["ok"]
+        assert "192.168.77.1" in a_addresses(link.a_if)
+        h.close()
+        assert h.p.returncode == 0
+        assert "192.168.77.1" not in a_addresses(link.a_if)
+
+
+def test_connect_back_rejects_wrong_token(tmp_path):
+    from autorustdesk.helper.transport import Listener
+
+    listener = Listener()
+    bad = tmp_path / "token"
+    bad.write_text("0" * 64)
+    p = subprocess.Popen([sys.executable, os.path.join(ROOT, "autorustdesk", "helper", "__main__.py"),
+                          "--connect", listener.address, "--token-file", str(bad)],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                         env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"})
+    try:
+        with pytest.raises(Exception):
+            listener.accept(5, lambda: p.poll() is None)
+        assert p.wait(timeout=10) == 2  # 助手发现界面验证不通过，不执行任何命令就退出
+    finally:
+        p.kill()
+        listener.close()

@@ -9,7 +9,7 @@ from autorustdesk.core.workflow import Candidate, Discovery, Ui, Workflow, alias
 
 @pytest.fixture(autouse=True)
 def isolated_config(tmp_path, monkeypatch):
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    monkeypatch.setenv("AUTORUSTDESK_CONFIG_DIR", str(tmp_path / "cfg"))
 
 
 def test_choose_subnet_avoids_conflicts():

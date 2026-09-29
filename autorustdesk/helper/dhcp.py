@@ -36,6 +36,7 @@ OPT_END = 255
 OPT_PAD = 0
 
 EventFn = Callable[[Dict], None]
+SocketFactory = Callable[[], socket.socket]
 
 
 def mac_str(raw: bytes) -> str:
@@ -152,8 +153,11 @@ class DhcpServer:
         lease_time: int = 3600,
         reservations: Optional[Dict[str, str]] = None,
         on_event: Optional[EventFn] = None,
+        socket_factory: Optional[SocketFactory] = None,
     ) -> None:
         self.iface = iface
+        # 各系统把套接字限定在直连网卡上的方法不同，由 backend 提供；默认用 Linux 的做法
+        self.socket_factory = socket_factory or self._linux_socket
         self.server_ip = server_ip
         self.network = ipaddress.ip_network("%s/%d" % (server_ip, prefix), strict=False)
         self.pool_start = ipaddress.ip_address(pool_start)
@@ -303,22 +307,43 @@ class DhcpServer:
 
     # ------------------------------------------------------------------ 网络
 
-    def start(self) -> None:
+    def _linux_socket(self) -> socket.socket:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        if hasattr(socket, "SO_BINDTODEVICE"):
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, self.iface.encode() + b"\x00")
         try:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            if hasattr(socket, "SO_BINDTODEVICE"):
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, self.iface.encode() + b"\x00")
             s.bind(("0.0.0.0", 67))
-        except OSError as e:
+        except OSError:
             s.close()
-            raise OSError("无法监听 DHCP 端口 67（可能有 dnsmasq 等 DHCP 服务在运行）：%s" % e)
+            raise
+        return s
+
+    def start(self) -> None:
+        try:
+            s = self.socket_factory()
+        except OSError as e:
+            raise OSError("无法监听 DHCP 端口 67（可能有别的 DHCP 服务在运行）：%s" % e)
         s.settimeout(0.5)
         self._sock = s
         self._stop.clear()
         self._thread = threading.Thread(target=self._loop, name="dhcp-%s" % self.iface, daemon=True)
         self._thread.start()
+
+    def restart(self, timeout: float = 15.0) -> None:
+        """重新打开套接字（网卡被停用再启用后，绑定在网卡地址上的套接字会失效）。已分配的地址保留。"""
+        self.stop()
+        deadline = time.time() + timeout
+        while True:
+            try:
+                self.start()
+                return
+            except OSError:
+                # 网卡刚启用时地址还没生效（重复地址检测），稍等再试
+                if time.time() >= deadline:
+                    raise
+                time.sleep(0.5)
 
     def stop(self) -> None:
         self._stop.set()

@@ -7,23 +7,38 @@ import sys
 from typing import List, Optional
 
 LINUX_CANDIDATES = ["/usr/bin/rustdesk", "/usr/share/rustdesk/rustdesk", "/usr/local/bin/rustdesk"]
-WINDOWS_CANDIDATES = [r"C:\Program Files\RustDesk\rustdesk.exe"]
-MAC_CANDIDATES = ["/Applications/RustDesk.app/Contents/MacOS/RustDesk"]
 FLATPAK_ID = "com.rustdesk.RustDesk"
+
+
+def windows_candidates() -> List[str]:
+    dirs = [os.environ.get("ProgramFiles") or r"C:\Program Files",
+            os.environ.get("ProgramFiles(x86)") or r"C:\Program Files (x86)"]
+    if os.environ.get("LOCALAPPDATA"):
+        dirs.append(os.path.join(os.environ["LOCALAPPDATA"], "Programs"))
+    return [os.path.join(d, "RustDesk", "rustdesk.exe") for d in dirs]
+
+
+def mac_candidates() -> List[str]:
+    apps = ["/Applications", os.path.expanduser("~/Applications")]
+    return [os.path.join(a, "RustDesk.app", "Contents", "MacOS", "RustDesk") for a in apps]
 
 
 def find_client(custom: str = "") -> Optional[List[str]]:
     """返回启动 RustDesk 的命令前缀，找不到返回 None。"""
     if custom:
+        if custom.endswith(".app") and os.path.isdir(custom):
+            # macOS：选的是 RustDesk.app，找到里面的可执行文件
+            inner = os.path.join(custom, "Contents", "MacOS", "RustDesk")
+            return [inner] if os.path.isfile(inner) else None
         if os.path.isfile(custom) and os.access(custom, os.X_OK):
             if custom.lower().endswith(".appimage"):
                 return [custom, "--appimage-extract-and-run"]
             return [custom]
         return None
     if sys.platform == "win32":
-        cands = WINDOWS_CANDIDATES
+        cands = windows_candidates()
     elif sys.platform == "darwin":
-        cands = MAC_CANDIDATES
+        cands = mac_candidates()
     else:
         cands = LINUX_CANDIDATES
     which = shutil.which("rustdesk")

@@ -8,7 +8,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 @pytest.fixture()
 def app(tmp_path, monkeypatch):
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    monkeypatch.setenv("AUTORUSTDESK_CONFIG_DIR", str(tmp_path / "cfg"))
     from PySide6.QtWidgets import QApplication
 
     return QApplication.instance() or QApplication([])

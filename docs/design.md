@@ -3,27 +3,32 @@
 ## 1. 总体架构
 
 ```
-┌──────────────────────── 电脑 A（Ubuntu）────────────────────────┐          ┌────── 电脑 B（Ubuntu 20.04）──────┐
+┌────────────── 电脑 A（Ubuntu / Windows / macOS）────────────────┐          ┌──── 电脑 B（Ubuntu 20.04~24.04）──┐
 │  图形界面 gui/  ─┐                                               │          │                                   │
 │  命令行 cli.py  ─┼─► 流程 core/workflow.py ──SSH（paramiko）────┼─ 网线 ──►│ ard_remote.py（上传后 sudo 运行） │
 │                  │      │  设备记录/设置 core/devices,settings  │          │  probe / install / configure /    │
 │                  │      │                                        │          │  link-ip / display-switch / revert│
-│                  │      └─ JSON 行（stdin/stdout）               │          │                                   │
+│                  │      └─ JSON 行（管道，或连回本机端口）       │          │                                   │
 │                  │           ▼                                   │          │ RustDesk（IP 直连 :21118）◄──────┤
-│                  │  网络助手 helper/（pkexec，root）             │          └───────────────────────────────────┘
+│                  │  网络助手 helper/（管理员 / root）            │          └───────────────────────────────────┘
 │                  │   网卡配置 / DHCP / 监听 / ARP / IPv6 探测    │
 │  本机 RustDesk 客户端 ◄── rustdesk --connect <IP> --password …   │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
 - **界面与流程分离**：`Workflow` 通过 `Ui` 回调输出进度、询问用户；图形界面和命令行各自实现 `Ui`。
-- **权限最小化**：界面以普通用户运行；只有网络操作放在一个以 root 运行的**网络助手**进程里。助手只用标准库，通过 stdin/stdout 上的 JSON 行通信。stdin 关闭（界面退出或崩溃）时，助手自动恢复网卡并退出。
+- **权限最小化**：界面以普通用户运行；只有网络操作放在一个以管理员权限运行的**网络助手**进程里。助手只用标准库，与界面之间用 JSON 行通信。连接断开（界面退出或崩溃）时，助手自动恢复网卡并退出。
+  - Linux：pkexec 弹出系统授权框，通过 stdin/stdout 通信。
+  - macOS：osascript（`do shell script … with administrator privileges`）弹出系统的管理员密码框；Windows：弹出 UAC 确认框。提权后的进程拿不到界面的管道，所以界面在 `127.0.0.1` 的随机端口监听，助手连回来（`helper/transport.py`）。令牌放在只有当前用户和管理员能读的临时文件里，双方各出一个随机数、用令牌算 HMAC 作答，互相验证身份，令牌本身不经过网络。
 - **B 端只用 Python 3.8 标准库**：Ubuntu 20.04 自带 python3（netplan 依赖它），脚本每次通过 SFTP 上传，不需要预装任何东西。
 
 ## 2. 网络方案
 
-### 2.1 A 端网卡配置（`helper/linkconfig.py`）
+### 2.1 A 端网卡配置（`helper/backend.py` 及 `os_linux.py`、`os_macos.py`、`os_windows.py`）
 
+网络助手只通过 `Backend` 接口操作网卡，各系统的实现：
+
+**Linux**（`linkconfig.py`）
 - 网卡由 NetworkManager 管理时，新建临时连接 `AutoRustDesk-<网卡>`，配置为：
   - `ipv4.method=manual`，地址 `192.168.77.1/24`；
   - `never-default=yes`，不改默认路由；
@@ -32,14 +37,28 @@
 
   结束时删除该连接，NetworkManager 会自动切回原来的连接。
 - 其它情况下直接用 `ip addr add` 配置，结束时删除。
-- 直连网段与本机其它网络冲突时，自动改用备选网段（`192.168.78.0/24`、`10.77.77.0/24`、`172.31.77.0/24`）。
 - ufw 已启用时，临时放行该网卡上的 UDP 67。
-- 所有修改记录在 `/run/autorustdesk/links.json`，异常退出后可以清理。
-- 助手监视网线状态：拔线换插另一台 B 时，NetworkManager 可能切回默认连接，导致直连地址丢失；网线重新接上后，助手会自动把直连配置补回来。
+
+**macOS**
+- 用 `ifconfig <网卡> inet 192.168.77.1 netmask 255.255.255.0 alias` 在网卡上追加地址，结束时 `-alias` 删除。不修改"系统设置"里的网络服务，不设网关，不影响 Wi-Fi。
+- 开启了应用程序防火墙时，用 `socketfilterfw` 临时允许本程序接收传入连接（DHCP 请求）。
+
+**Windows**
+- 用 netsh 配置，命令里用网卡序号（网卡名可能是中文，序号没有编码问题）：
+  - 网卡原来是"自动获得 IP 地址"：临时改为固定地址 `192.168.77.1`（`gateway=none`），结束时改回自动获得；
+  - 原来就是固定地址：只追加一个地址，结束时删除。
+- Windows 的地址配置会保存在系统里，所以**先写记录、再改配置**；助手意外退出（甚至断电）后，下次启动会按记录恢复。记录里同时保存网卡 GUID，USB 网卡换了插口、序号变了也能找回。
+- 防火墙临时添加规则 `AutoRustDesk-DHCP`，放行 UDP 67。
+
+**各系统共同**
+- 直连网段与本机其它网络冲突时，自动改用备选网段（`192.168.78.0/24`、`10.77.77.0/24`、`172.31.77.0/24`）。
+- 所有修改记录在状态文件里（Linux `/run/autorustdesk/links.json`，macOS `/var/run/autorustdesk/links.json`，Windows `%ProgramData%\AutoRustDesk\links.json`），异常退出后可以清理。
+- 配置前先看网卡是否已经从别的 DHCP 服务器拿到了地址（Linux 看 NetworkManager 的租约；macOS 看 `ipconfig getpacket` 且地址仍在网卡上；Windows 看 DHCP 分配的地址），并且网关能 ping 通：是的话说明插的是局域网，不启动 DHCP。
+- 助手监视网线状态：拔线换插另一台 B 时，直连地址可能丢失；网线重新接上后，助手会自动把直连配置补回来。
 
 ### 2.2 DHCP 服务（`helper/dhcp.py`）
 
-- 只绑定直连网卡（`SO_BINDTODEVICE`），地址池 `.100–.199`。
+- 只收发直连网卡上的报文：Linux 用 `SO_BINDTODEVICE`，macOS 用 `IP_BOUND_IF`，Windows 绑定在网卡地址上（Windows 上这样的套接字能收到该网卡上的广播）并设置 `IP_UNICAST_IF`。地址池 `.100–.199`。
 - **不下发网关（option 3）和 DNS（option 6）**，B 的默认路由和原有网络不受影响。
 - 按 MAC 固定分配地址（设备记录里的保留地址），避免同型号设备轮流使用同一个 IP。
 - 请求的地址不属于本网段时回 NAK（B 带着别的网络的旧租约时，能立刻重新申请）。
@@ -47,18 +66,22 @@
 
 ### 2.3 发现 B（`helper/sniffer.py`、`helper/arp.py`、`helper/icmp6.py`）
 
+收发原始以太网帧（`helper/packetio.py`）：Linux 用 AF_PACKET；macOS 用系统自带的 libpcap；Windows 用 Npcap 的 wpcap.dll。libpcap 通过 ctypes 调用，不需要编译。
+
 几种办法同时进行，任何一个先找到就行：
 
 | 办法 | 适用情况 |
 |---|---|
 | DHCP 分配记录 | B 的网口是 DHCP（Ubuntu 桌面版默认） |
-| 被动监听（AF_PACKET）：ARP、IPv4、IPv6、DHCP 报文的源地址 | B 有任何流量 |
+| 被动监听：ARP、IPv4、IPv6、DHCP 报文的源地址 | B 有任何流量 |
 | 向 `ff02::1` 发 ICMPv6 ping，得到 B 的 `fe80::` 地址 | B 开着 IPv6（Linux 默认开启），不管 IPv4 怎么配置 |
 | 对直连网段做 ARP 扫描：前 30 秒每 3 秒一次，之后每 10 秒一次（254 个地址约 0.1 秒，发出后由监听收集回应，不逐个等待） | B 还拿着上次的地址，又不发报文 |
 | 3 秒没有任何发现时，对常见私有网段做一次 ARP 探测（发送方 IP 0.0.0.0，Linux 会回应；约 4000 个地址，约 1 秒） | B 是固定 IP、不发报文，且禁用了 IPv6 |
 | **电子拔插网线**：5 秒内 B 既没有地址、也没来请求地址时，让 A 的网口断开再接上 | B 的 DHCP 已放弃重试（见下） |
 
 IPv6 探测和 ARP 扫描都是"发出即返回"，回应由链路监听收集。发现循环由事件驱动：一收到新信息就立即处理，没有新信息时最多等 0.3 秒。
+
+**Windows 没装 Npcap 时**不能抓包，改为：DHCP 分配记录照常；每秒读取系统邻居表（`GetIpNetTable2`），B 回应 IPv6 探测时会先询问 A 的 MAC，A 的邻居表里就有了 B 的 `fe80::` 地址；直连网段的 ARP 扫描改用系统的 `SendARP`（32 个线程并发）。只有"B 是固定 IP、不在直连网段、又关闭了 IPv6"这一种情况找不到，界面会提示安装 Npcap。
 
 **电子拔插网线**的原因：NetworkManager 1.22（Ubuntu 20.04）有以下行为，都已在源码中确认：
 
@@ -69,8 +92,10 @@ IPv6 探测和 ARP 扫描都是"发出即返回"，回应由链路监听收集�
 
 所以如果 B 在 A 的 DHCP 服务就绪之前就插上了网线，它可能要等好几分钟才会再来要地址。电子拔插分两次：
 
-1. 5 秒时先做一次"快速"的：网卡重新协商链路（`SIOCETHTOOL`/`ETHTOOL_NWAY_RST`，等同 `ethtool -r`），断开 2~3 秒，A 自己的 NetworkManager 连接不受影响。网卡不支持重新协商时，改为关闭网口 2 秒。
+1. 5 秒时先做一次"快速"的：Linux 上让网卡重新协商链路（`SIOCETHTOOL`/`ETHTOOL_NWAY_RST`，等同 `ethtool -r`），断开 2~3 秒，A 自己的 NetworkManager 连接不受影响；网卡不支持重新协商时，以及在 macOS（`ifconfig down/up`）和 Windows（停用再启用网卡）上，改为关闭网口 2 秒。
 2. 25 秒仍没有发现 B，再做一次"长"的：关闭网口 7 秒，超过 6 秒的宽限期，B 正在进行中的 DHCP 也会重来。
+
+Windows 停用网卡后，绑定在网卡地址上的 DHCP 套接字会失效，拔插结束后助手会重新打开它（已分配的地址保留）；抓包句柄出错时也会自动重新打开。
 
 拔插期间，助手不上报断线事件；拔插结束后，助手会检查直连配置，必要时重新启用。
 
@@ -169,27 +194,40 @@ autorustdesk-bundle/
 - 密码不出现在 A 发往 B 的命令行里：通过 SFTP 写入 0600 的临时文件，用后立即删除。sudo 密码通过 stdin 传给 `sudo -S`。
 - IP 直连端口默认对 B 的所有网卡开放，所以用 RustDesk 白名单限制为只允许直连网段连接。
 
-## 6. 跨平台计划
+## 6. 各系统的实现
 
-| | Ubuntu（已完成） | Windows（计划） | macOS（计划） |
+| | Linux | Windows | macOS |
 |---|---|---|---|
-| 提权 | pkexec 启动助手 | 程序以管理员运行（UAC 清单） | `sudo -A` + osascript 密码框 |
-| 网卡配置 | nmcli / ip | `netsh interface ipv4 set address` | `networksetup -setmanual` |
-| DHCP | SO_BINDTODEVICE | 绑定网卡地址 | IP_BOUND_IF |
-| 监听/ARP | AF_PACKET | Npcap（可选） | BPF |
-| IPv6 探测 | 原始套接字 | `ping -6` + `Get-NetNeighbor` | `ping6` + `ndp -an` |
+| 提权 | pkexec | UAC（`ShellExecuteEx` + `runas`） | osascript 管理员密码框 |
+| 与界面通信 | 管道 | 连回本机端口 + 令牌互验 | 连回本机端口 + 令牌互验 |
+| 网卡配置 | NetworkManager 临时连接 / ip | netsh（必要时临时改固定地址，结束后改回） | ifconfig alias |
+| 网卡列表、网线状态 | /sys/class/net | iphlpapi `GetAdaptersAddresses` | ifconfig + networksetup |
+| DHCP 套接字 | SO_BINDTODEVICE | 绑定网卡地址 + IP_UNICAST_IF | IP_BOUND_IF |
+| 抓包、ARP | AF_PACKET | Npcap（可选；没有时用邻居表 + SendARP） | 系统自带 libpcap |
+| IPv6 探测 | 原始套接字 | 原始套接字（自己算校验和） | 原始套接字 |
+| 电子拔插 | 重新协商链路 / ip link | 停用再启用网卡 | ifconfig down/up |
+| 防火墙 | ufw（启用时） | 添加入站规则 | socketfilterfw（启用时） |
+| 打包 | PyInstaller（build_linux.sh） | PyInstaller：AutoRustDesk.exe + AutoRustDesk-cli.exe | PyInstaller：AutoRustDesk.app |
 
-`helper/` 的命令协议与平台无关，移植时只需实现平台相关的部分。
+`helper/` 的命令协议与平台无关，`server.py` 只通过 `Backend` 接口操作网卡。
 
 ## 7. 测试
 
 - **单元测试**：dpkg 版本比较、依赖解析、DHCP 报文与分配逻辑、链路报文解析、GDM 配置修改（用 RustDesk 的判断逻辑验证）、CVT Modeline（对照 `cvt` 输出）、设置与设备记录、界面冒烟测试。
-- **集成测试**（`tests/integration`）：用网络命名空间和 veth 模拟网线直连，覆盖以下场景：
+- **macOS / Windows 的逻辑单元测试**：用真实系统的命令输出样例测解析；用假的命令执行器验证 ifconfig / netsh 的调用顺序、恢复和崩溃后清理；Windows 结构体的大小和字段偏移与 SDK 对照；在内存里构造 `IP_ADAPTER_ADDRESSES` 等结构测试解析。
+- **集成测试**（`tests/integration`）：用网络命名空间和 veth 模拟网线直连。抓包分别用 AF_PACKET、libpcap（macOS/Windows 用的实现）和"不能抓包"（模拟 Windows 没装 Npcap）三种方式各跑一遍，覆盖以下场景：
   - 真实 dhclient 获取地址（验证不下发默认路由）；
   - 固定 IP 设备的被动发现；
+  - 不发报文的固定 IP 设备的主动 ARP 扫描（本网段请求与常见网段探测）；
   - 外来 DHCP 服务器的防误伤；
   - 电子拔插（B 端能看到断开再接上，A 的配置保持不变）；
-  - 异常退出后的清理。
+  - 异常退出后的清理；
+  - 连回界面的通信方式（令牌错误时双方都拒绝）。
+- **真实 Windows / macOS**（`tests/platform_smoke.py`，在 GitHub Actions 上以管理员运行）：
+  - 两个系统：列网卡、读网线状态、以管理员启动助手并连回、在真实网卡上监听；
+  - macOS：用 feth 虚拟网卡对当网线，完整走一遍配置地址、libpcap 抓包、ARP 扫描、模拟 B 的 DHCP 请求拿到地址、电子拔插、退出后恢复；
+  - Windows：真实调用 iphlpapi（验证结构体布局）、SendARP；创建 KM-TEST 环回网卡，验证 netsh 配置固定地址、防火墙规则、DHCP 服务收包、停用再启用网卡、退出后恢复为原来的获取方式。
+  然后打包，并运行打包后程序的自检（`selftest`：加载界面、SSH、网卡接口）。
 - **端到端测试**（`tests/e2e`）：A 与一个 Ubuntu 容器（20.04 / 22.04 / 24.04，`--network none`，SSH + sudo + dhclient + systemd 桩）之间用 veth 相连，用同一个多版本离线包完整跑通离线安装和配置，覆盖以下场景：
   - DHCP、DHCP 已放弃重试（模拟 NetworkManager，只在网线接上时请求地址，验证电子拔插）、固定 IP、静默固定 IP 四种网络情况；
   - 程序不退出时拔线换插另一台设备；

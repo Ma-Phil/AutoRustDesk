@@ -29,7 +29,8 @@
 
 ![主窗口（示意）](docs/images/main-window.png)
 
-> 当前版本的电脑 A 支持 **Ubuntu（及其它使用 NetworkManager 的 Linux 桌面）**，Windows 和 macOS 在规划中（见[路线图](#路线图)）。
+> 电脑 A 支持 **Ubuntu（及其它 Linux 桌面）、Windows 10/11、macOS 11 及以上**。
+> Windows 和 macOS 版是新加入的：在 GitHub Actions 的真实 Windows / macOS 系统上做了自动化测试，但还没有接真实的电脑 B 验证过，遇到问题欢迎反馈。
 > 需求和设计见 [docs/requirements.md](docs/requirements.md)、[docs/design.md](docs/design.md)。
 
 ---
@@ -47,10 +48,10 @@
 
 | | 要求 |
 |---|---|
-| 电脑 A | Ubuntu 20.04 及以上（x86_64）桌面版；有有线网口或 USB 网卡；已安装 RustDesk 客户端（用于最后一步自动打开连接） |
+| 电脑 A | 以下任一系统，有有线网口或 USB 网卡，已安装 RustDesk 客户端（用于最后一步自动打开连接）：<br>· Ubuntu 20.04 及以上（x86_64）桌面版<br>· Windows 10 / 11（x64），建议安装 [Npcap](https://npcap.com)<br>· macOS 11 及以上（Apple 芯片或 Intel） |
 | 电脑 B | Ubuntu 20.04 / 22.04 / 24.04 桌面版，x86_64；**已开启 SSH**；有一个可以 sudo 的账号。26.04 只能部分支持，见[常见问题](#常见问题) |
 | 网线 | 普通网线即可（现代网卡自动识别直连/交叉） |
-| 制作离线包 | 任意一台能上网、装了 Python 3.8+ 的电脑（只需做一次） |
+| 制作离线包 | 任意一台能上网的电脑（Linux / Windows / macOS 都可以，只需做一次） |
 
 ## 快速开始
 
@@ -74,7 +75,26 @@
 
 ### 第 2 步：在电脑 A 上安装本程序
 
-**方式一：打包版（推荐，免装 Python 依赖）**
+**Windows**
+
+1. 下载 `AutoRustDesk-<版本>-windows-x64.zip`（见下方[下载](#下载)），解压到任意目录，运行 `AutoRustDesk.exe`。
+   第一次运行时 Windows 可能提示"已保护你的电脑"（程序没有数字签名），点「更多信息 → 仍要运行」。
+2. 建议安装 [Npcap](https://npcap.com)（Wireshark 用的同一个抓包驱动，按默认选项安装即可）。
+   不装也能用：B 用 DHCP（Ubuntu 默认）或开着 IPv6 时都能找到；只有 B 是固定 IP、又关闭了 IPv6 时才必须装。
+3. 命令行（制作离线包等）用同目录下的 `AutoRustDesk-cli.exe`。
+
+**macOS**
+
+1. 下载 `AutoRustDesk-<版本>-macos-arm64.zip`（Apple 芯片）或 `…-macos-x86_64.zip`（Intel），解压后把 `AutoRustDesk.app` 拖进「应用程序」。
+2. 程序没有经过 Apple 公证，第一次打开会提示"无法验证开发者"：
+   - macOS 15 及以上：先打开一次，然后到「系统设置 → 隐私与安全性」，点「仍要打开」；
+   - macOS 14 及以下：在访达里右键点 `AutoRustDesk.app` →「打开」；
+   - 或者在终端执行 `xattr -dr com.apple.quarantine /Applications/AutoRustDesk.app`。
+3. 不需要安装其它东西（抓包用系统自带的 libpcap）。
+
+**Ubuntu**
+
+方式一：打包版（推荐，免装 Python 依赖）
 
 ```bash
 bash packaging/build_linux.sh          # 在一台 Ubuntu 上打包一次（需要联网）
@@ -90,7 +110,7 @@ sudo apt install libxcb-cursor0
 
 这些库会一起打进程序包，所以把包拷到其它 Ubuntu 电脑上解压就能直接运行，那台电脑不需要再装。
 
-**方式二：源码运行**
+方式二：源码运行（Windows、macOS 也可以这样运行，需要 Python 3.8 以上）
 
 ```bash
 sudo apt install python3-venv libxcb-cursor0
@@ -100,14 +120,25 @@ python3 -m venv .venv
 .venv/bin/python -m autorustdesk
 ```
 
-程序以普通用户身份运行。只有配置网卡、运行 DHCP 这类网络操作，会通过系统授权框（pkexec）以 root 权限执行，每次启动输入一次密码。
+**权限**：程序以普通用户身份运行。只有配置网卡、运行 DHCP 这类网络操作，会在点「一键连接」时通过系统授权以管理员权限执行，每次启动授权一次：Ubuntu 弹出系统授权框（pkexec），Windows 弹出 UAC 确认框，macOS 弹出管理员密码框。
+
+**本机网络会怎样变化**：只改插网线的那个网口，不设网关、不改 DNS，Wi-Fi 上网不受影响；关闭程序或点「恢复本机网络」后复原。
+- Ubuntu：临时新建一个 NetworkManager 连接，结束后删除，自动切回原来的连接；
+- macOS：在网口上临时追加一个地址，不修改「系统设置」里的网络配置；
+- Windows：网口原来是"自动获得 IP 地址"时，临时改为固定地址 192.168.77.1，结束后改回自动获得。
+
+#### 下载
+
+Windows 和 macOS 版由 GitHub Actions 自动打包：
+- 正式版本在仓库的 [Releases](https://github.com/Ma-Phil/AutoRustDesk/releases) 页面；
+- 最新的开发版在 [Actions](https://github.com/Ma-Phil/AutoRustDesk/actions) 里，打开最近一次成功的"测试与打包"，在页面底部的 Artifacts 下载（需要登录 GitHub）。
 
 ### 第 3 步：连接电脑 B
 
 1. 用网线连接 A 和 B，确认 B 已开机（网口灯亮）。
 2. 在「直连网卡」里选择插了网线的网口（一般会自动选好）。在「离线包」里选择第 1 步得到的 `.tar`；如果 B 已经装好 RustDesk，可以不选。
 3. 点「**一键连接**」。
-   - 弹出系统授权框时，输入 A 的密码。
+   - 弹出系统授权框时，输入 A 的密码（Windows 上点「是」）。
    - 弹出登录框时，输入 B 的 SSH 账号和密码。同型号设备通常账号相同，可以勾选「记住密码」。
 4. 完成后自动打开 RustDesk 窗口。B 没有登录时，先看到 B 的登录界面，输入 B 的系统密码登录即可。
 5. 用完后关闭程序，或点「恢复本机网络」，A 的网卡会恢复原来的设置。
@@ -164,7 +195,11 @@ python3 -m venv .venv
 
 **直连网段与本机网络冲突**：程序会自动改用其它网段，也可以在「设置 → 网络」里指定。
 
-**异常退出后 A 的网卡没有恢复**：重新打开程序后点「恢复本机网络」，或执行 `sudo python3 -m autorustdesk helper --cleanup`。
+**异常退出后 A 的网卡没有恢复**：重新打开程序后点「恢复本机网络」。也可以用命令行：Ubuntu 执行 `sudo python3 -m autorustdesk helper --cleanup`；Windows 以管理员身份打开命令提示符，执行 `AutoRustDesk-cli.exe helper --cleanup`；macOS 执行 `sudo /Applications/AutoRustDesk.app/Contents/MacOS/AutoRustDesk helper --cleanup`。
+
+**Windows 提示"没有安装 Npcap"**：不装 Npcap 时，B 用 DHCP 或开着 IPv6 都能找到；只有 B 是固定 IP、不在直连网段、又关闭了 IPv6 时会找不到。安装 [Npcap](https://npcap.com) 后重新点「一键连接」即可。
+
+**macOS 上找不到用 DHCP 的 B**：如果在「系统设置 → 网络 → 防火墙 → 选项」里开启了"阻止所有传入连接"，B 的地址请求会被挡住，请暂时关闭这个选项。普通的防火墙开启状态不影响，程序会临时放行自己。
 
 ## 命令行用法
 
@@ -176,14 +211,20 @@ python3 -m autorustdesk connect --bundle x.tar --user robot     # 命令行执�
 python3 -m autorustdesk connect --quick       # 已配置过的设备直接连接
 ```
 
+打包版中，`python3 -m autorustdesk` 换成程序本身：Ubuntu 为 `./AutoRustDesk`，Windows 为 `AutoRustDesk-cli.exe`，macOS 为 `/Applications/AutoRustDesk.app/Contents/MacOS/AutoRustDesk`。
+
 ## 开发与测试
 
 ```bash
 pip install -r requirements.txt pytest
 python3 -m pytest                                  # 单元测试 + GUI 冒烟测试
-sudo python3 -m pytest tests/integration           # 用网络命名空间模拟网线直连（需要 root、dhclient）
+sudo python3 -m pytest tests/integration           # 用网络命名空间模拟网线直连（需要 root、dhclient；装了 libpcap 时也测 libpcap 抓包）
 sudo python3 -m tests.e2e.run_e2e --bundle x.tar --ubuntu 22.04   # 端到端：A ⇄ 虚拟网线 ⇄ Ubuntu 容器（20.04/22.04/24.04，需要 Docker）
+sudo python3 tests/platform_smoke.py               # 在真实的 macOS / Windows（管理员）上测试网卡接口和网络助手
+python packaging/build.py                          # 打包 Windows / macOS 版（在对应系统上运行）
 ```
+
+每次推送代码，GitHub Actions 会在 Linux、Windows、macOS（Apple 芯片和 Intel）上运行测试：Linux 上以 root 跑网络集成测试；macOS 上用 feth 虚拟网卡对当网线，完整走一遍配置、抓包、DHCP、ARP 扫描；Windows 上创建环回网卡测试 netsh 配置和恢复。然后打包 Windows 和 macOS 版。推送 `v*` 标签（如 `git tag v0.2.0 && git push origin v0.2.0`）时，会把打好的包发布到 Releases。
 
 端到端测试用 `tests/fakes/make_fake_rustdesk.py` 生成的"假 RustDesk"deb 制作离线包。它的依赖列表和安装脚本与官方包一致，程序本体换成了模拟命令行行为的脚本。测试会在不联网的 Ubuntu 20.04 容器里真实地走一遍离线安装。测试覆盖五种场景：B 用 DHCP、B 的 DHCP 已放弃重试（模拟 NetworkManager，只在网线接上时请求地址）、B 是固定 IP 且有流量、B 是固定 IP 且完全不发报文、程序不退出时拔线换插另一台设备；另外还验证快速连接和重复运行的幂等性。
 
@@ -192,20 +233,21 @@ sudo python3 -m tests.e2e.run_e2e --bundle x.tar --ubuntu 22.04   # 端到端：
 ```
 autorustdesk/
   bundle/        离线包：格式、制作（纯 Python 解析 Ubuntu 软件源并计算依赖闭包）
-  helper/        以 root 运行的网络助手：网卡配置、DHCP 服务、链路监听、ARP 扫描、IPv6 探测
+  helper/        以管理员权限运行的网络助手：网卡配置、DHCP 服务、链路监听、ARP 扫描、IPv6 探测
+                 （backend.py 为各系统的接口，os_linux / os_macos / os_windows 为具体实现）
   remote/        在电脑 B 上执行的脚本 ard_remote.py（Python 3.8 标准库）
   core/          流程编排、SSH、设备记录、设置、网卡列表、本机 RustDesk
   gui/           PySide6 图形界面
   cli.py         命令行模式
-packaging/       PyInstaller 打包、桌面快捷方式
+packaging/       PyInstaller 打包（Linux：build_linux.sh；Windows / macOS：build.py）、桌面快捷方式
 tests/           单元测试、集成测试、端到端测试
 ```
 
 ## 路线图
 
 - [x] 第一期：电脑 A = Ubuntu
-- [ ] 第二期：电脑 A = Windows（netsh 配置网卡、程序以管理员运行、Npcap 可选）
-- [ ] 第三期：电脑 A = macOS（networksetup + 授权助手）
+- [x] 第二期：电脑 A = Windows（netsh 配置网卡、UAC 授权网络助手、Npcap 可选）——待真机验证
+- [x] 第三期：电脑 A = macOS（ifconfig 临时地址、系统自带 libpcap、管理员密码框授权）——待真机验证
 - [ ] B 没有 SSH 时的 U 盘引导包
 - [ ] 通过自建 RustDesk 服务器跨网络远程
 

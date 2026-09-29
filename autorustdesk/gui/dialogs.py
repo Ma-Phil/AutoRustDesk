@@ -1,6 +1,7 @@
 """对话框：登录、设置、制作离线包、设备列表。"""
 
 import os
+import sys
 from typing import Dict, List, Optional
 
 from PySide6.QtCore import Qt
@@ -41,6 +42,12 @@ def _hint(text: str) -> QLabel:
     lab.setStyleSheet("color: #666666;")
     return lab
 
+
+
+CLIENT_HINT = {
+    "win32": r"C:\Program Files\RustDesk\rustdesk.exe",
+    "darwin": "/Applications/RustDesk.app",
+}.get(sys.platform, "/usr/bin/rustdesk、Flatpak 等")
 
 class CredentialsDialog(QDialog):
     def __init__(self, parent: QWidget, title: str, username: str, error: str,
@@ -183,7 +190,7 @@ class SettingsDialog(QDialog):
         w = QWidget()
         f = QFormLayout(w)
         self.client = QLineEdit(settings.rustdesk_client)
-        self.client.setPlaceholderText("留空自动查找（/usr/bin/rustdesk、Flatpak 等）")
+        self.client.setPlaceholderText("留空自动查找（%s）" % CLIENT_HINT)
         row = QHBoxLayout()
         row.addWidget(self.client)
         browse = QPushButton("选择…")

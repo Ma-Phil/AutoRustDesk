@@ -515,7 +515,7 @@ class MainWindow(QMainWindow):
 
     def about(self) -> None:
         QMessageBox.about(self, "关于 %s" % APP_NAME, (
-            "<b>%s %s</b><br>用网线直连电脑 B（Ubuntu 20.04），自动组网、离线部署并配置 RustDesk，"
+            "<b>%s %s</b><br>用网线直连电脑 B（Ubuntu 20.04 / 22.04 / 24.04），自动组网、离线部署并配置 RustDesk，"
             "然后以 IP 直连方式远程控制。<br><br>RustDesk 是 RustDesk 团队的开源软件（AGPL-3.0），"
             "本工具只分发官方原版安装包。") % (APP_NAME, __version__))
 
