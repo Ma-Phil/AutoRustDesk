@@ -231,13 +231,29 @@ jobs:
             echo "::error::标签 $RELEASE_TAG 和程序版本号 $version 不一致，请先修改 autorustdesk/__init__.py"
             exit 1
           fi
+      - name: 这个版本已经发布过时不再改动
+        id: existing
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # 在 Releases 页面点"发布"时 GitHub 才创建标签，这也会触发一次运行。
+          # 这时 Release 已经发布了，不能再改回草稿，也不能换掉里面的文件。
+          state=$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null || echo none)
+          echo "已有的 Release（isDraft）：$state"
+          if [ "$state" = "false" ]; then
+            echo "::notice::$RELEASE_TAG 已经发布，不再改动"
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          fi
       - uses: actions/download-artifact@v4
+        if: steps.existing.outputs.published != 'true'
         with:
           path: artifacts
           merge-multiple: true
       - name: 计算校验和
+        if: steps.existing.outputs.published != 'true'
         run: cd artifacts && sha256sum * > SHA256SUMS.txt && ls -la
       - uses: softprops/action-gh-release@v2
+        if: steps.existing.outputs.published != 'true'
         with:
           draft: true
           tag_name: ${{ env.RELEASE_TAG }}
