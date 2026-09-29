@@ -174,7 +174,7 @@ autorustdesk-bundle/
 3. **防止休眠**：mask `sleep`、`suspend`、`hibernate`、`hybrid-sleep` 这几个 target。
 4. **防火墙**：ufw 启用时，放行直连网段访问 21118/tcp。
 5. **重启登录界面**：显示设置有变化时，如果 B 上**没有用户登录**就自动重启显示管理器，并等待 greeter 会话出现；有用户登录时先询问。
-6. **RustDesk 设置**：先等 RustDesk 服务就绪（`--get-id` 能取到 ID），再用 `rustdesk --option` 设置以下选项，每项都回读校验：
+6. **RustDesk 设置**：先等 RustDesk 的 `--server` 进程运行满 5 秒（原因见下），再用 `rustdesk --option` 设置以下选项，每项都回读校验：
    - `direct-server=Y`
    - `direct-access-port`
    - `verification-method=use-permanent-password`
@@ -182,7 +182,11 @@ autorustdesk-bundle/
    - `whitelist`（与已有白名单合并）
 
    然后用 `rustdesk --password` 设置固定密码，直到返回 `Done!` 为止。
-7. **校验**：`/proc/net/tcp` 中 21118 端口处于监听状态。
+7. **校验**：`/proc/net/tcp` 中 21118 端口处于监听状态，并且写设置期间 `--server` 没有重启过。不满足就重新写一遍设置和密码，还不行就重启 RustDesk 服务后再写。
+
+RustDesk 1.4 在 Linux 上的进程结构决定了设置什么时候写才有效：root 的 `--service` 在有图形会话（包括登录界面）时，以会话用户的身份（登录界面是 `gdm`）启动 `--server`。直连端口由 `--server` 监听，`sudo rustdesk --option/--password` 也是通过 IPC 交给它的。`--server` 刚启动时会从 `--service` 同步一次配置，覆盖自己的；之后自己的配置一变就推给 `--service`，由后者写回 root 的配置文件（`/root/.config/rustdesk/RustDesk2.toml`）。`--service` 只在启动时读一次这个文件。
+
+所以刚启动（或重启）RustDesk 服务、`--server` 还没起来时写的设置会丢：`--option` 连不上 IPC，只写进了配置文件，`--service` 不会重新读；`--server` 起来后同步到的是 `--service` 内存里的旧配置，再推回去时连文件里的也覆盖了，重启服务也找不回来。`--get-id` 连不上 IPC 时照样从配置文件里读出 ID，不能用来判断服务是否就绪。另外，登录界面是 Wayland 时 `--server` 以 root 身份运行，不和 `--service` 同步配置，所以写完设置后要重启一次服务，让它重新读取配置文件，否则用户登录后的 `--server` 会拿到旧设置。
 
 所有修改都写入 `/etc/autorustdesk/state.json`，`revert` 子命令会据此撤销。
 

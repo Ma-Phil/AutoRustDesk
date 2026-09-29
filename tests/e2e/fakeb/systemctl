@@ -18,8 +18,10 @@ start_rustdesk() {
 }
 
 stop_rustdesk() {
+    # 和 systemd 一样连同 --service 启动的 --server 子进程一起停掉
     rustdesk_running && kill "$(cat /var/lib/fake-rustdesk/service.pid)"
-    rm -f /var/lib/fake-rustdesk/service.pid
+    [ -f /var/lib/fake-rustdesk/server.pid ] && kill -9 "$(cat /var/lib/fake-rustdesk/server.pid)" 2>/dev/null
+    rm -f /var/lib/fake-rustdesk/service.pid /var/lib/fake-rustdesk/server.pid
 }
 
 cmd="$1"; shift

@@ -54,6 +54,8 @@ WAYLAND_ONLY_WARNING = (
     "B 没接显示器时也无法使用；需要有人在 B 上登录桌面后才能远程，连接时 B 上可能要确认共享屏幕"
 )
 DEFAULT_PORT = 21118
+# RustDesk 的 --server 进程运行满这么多秒后才写设置，见 wait_rustdesk_server()
+SERVER_SETTLE_SECONDS = 5
 
 
 class ArdError(Exception):
@@ -403,6 +405,23 @@ def parse_loginctl_show(text):
     return props
 
 
+def is_rustdesk_server(argv, exe):
+    """命令行 argv 是不是 RustDesk 的 --server 进程（exe 是 rustdesk 程序的真实路径）。
+
+    真实的进程是 `/usr/share/rustdesk/rustdesk --server`，以会话用户身份启动它的
+    `sudo -E ... -u 用户 .../rustdesk --server` 不算；测试用的假 RustDesk 是 Python 脚本，
+    命令行是 `python3 .../rustdesk --server`。
+    """
+    i = 1 if argv and os.path.basename(argv[0]).startswith("python") else 0
+    return len(argv) > i + 1 and argv[i + 1] == "--server" and os.path.realpath(argv[i]) == exe
+
+
+def proc_start_ticks(stat_text):
+    """/proc/<pid>/stat 的第 22 项：进程在开机后第几个时钟滴答启动。"""
+    # 第 2 项是括号里的进程名，可能含空格，从最后一个右括号之后数
+    return int(stat_text.rsplit(")", 1)[1].split()[19])
+
+
 # ---------------------------------------------------------------------------
 # 系统信息
 # ---------------------------------------------------------------------------
@@ -637,15 +656,68 @@ def rd_get_id(timeout=20):
     return ""
 
 
-def wait_rustdesk_ipc(timeout=60):
-    """等 RustDesk 服务进程就绪（能通过 IPC 取到 ID）。"""
+def rustdesk_servers(proc="/proc"):
+    """正在运行的 RustDesk --server 进程：[{"pid", "uid", "age"}]，age 是已经运行的秒数。"""
+    exe = rustdesk_bin()
+    if not exe:
+        return []
+    exe = os.path.realpath(exe)
+    try:
+        uptime = float((read_file(os.path.join(proc, "uptime"), "") or "").split()[0])
+        pids = [p for p in os.listdir(proc) if p.isdigit()]
+    except (OSError, ValueError, IndexError):
+        return []
+    hz = float(os.sysconf("SC_CLK_TCK"))
+    result = []
+    for pid in pids:
+        base = os.path.join(proc, pid)
+        try:
+            with open(os.path.join(base, "cmdline"), "rb") as f:
+                argv = [a.decode("utf-8", "replace") for a in f.read().split(b"\0")]
+            if not is_rustdesk_server(argv, exe):
+                continue
+            start = proc_start_ticks(read_file(os.path.join(base, "stat"), "") or "") / hz
+            uid = os.stat(base).st_uid
+        except (OSError, ValueError, IndexError):
+            continue  # 进程刚好退出了
+        result.append({"pid": int(pid), "uid": uid, "age": uptime - start})
+    return result
+
+
+def wait_rustdesk_server(timeout=60, settle=None):
+    """等 RustDesk 的 --server 进程启动并运行满 settle 秒，返回这些进程（等不到时返回当时的情况）。
+
+    RustDesk 1.4 的 --service（root）在有图形会话（包括登录界面）时，以该会话的用户身份
+    （登录界面是 gdm）启动 --server：直连端口由它监听，`rustdesk --option/--password` 也是
+    通过 IPC 交给它的。--server 刚启动时会从 --service 同步一次配置，覆盖掉之前写进去的设置；
+    它还没启动时，--option 只写进 root 的配置文件，正在运行的 --service 不会重新读取，
+    --server 启动后同步过来的旧配置还会被写回这个文件——设置就这样丢了，重启服务也找不回来。
+    所以要等 --server 稳定下来再写设置。
+    """
+    settle = SERVER_SETTLE_SECONDS if settle is None else settle
     deadline = time.time() + timeout
-    while time.time() < deadline:
-        rid = rd_get_id()
-        if rid:
-            return rid
-        time.sleep(2)
-    return ""
+    while True:
+        servers = rustdesk_servers()
+        if servers and min(s["age"] for s in servers) >= settle:
+            return servers
+        if time.time() >= deadline:
+            return servers
+        time.sleep(1)
+
+
+def describe_servers(servers):
+    """--server 进程以哪些用户身份运行，如 "gdm"。"""
+    names = []
+    for s in servers:
+        try:
+            import pwd  # 只在 Linux 上有；本文件在其它系统上也会被单元测试导入
+
+            name = pwd.getpwuid(s["uid"]).pw_name
+        except (ImportError, KeyError):
+            name = str(s["uid"])
+        if name not in names:
+            names.append(name)
+    return "、".join(names)
 
 
 def rd_set_option(key, value, attempts=5):
@@ -1062,11 +1134,8 @@ def configure_firewall(args, changes):
         log("警告：添加防火墙规则失败：%s" % out.strip())
 
 
-def configure_rustdesk(args, password, changes, warnings, xorg_ok=True):
-    step("等待 RustDesk 服务就绪")
-    rid = wait_rustdesk_ipc(timeout=args.ipc_timeout)
-    if not rid:
-        warnings.append("RustDesk 服务没有就绪（取不到 ID），可能是没有图形会话；继续尝试设置")
+def rustdesk_options(args):
+    """要写进 RustDesk 的设置：[(键, 值)]。"""
     wanted = [
         ("direct-server", "Y"),
         ("direct-access-port", str(args.port)),
@@ -1075,23 +1144,90 @@ def configure_rustdesk(args, password, changes, warnings, xorg_ok=True):
     ]
     if args.whitelist:
         wanted.append(("whitelist", merge_whitelist(rd_get_option("whitelist"), args.whitelist)))
-    step("设置 RustDesk 选项")
+    return wanted
+
+
+def apply_rustdesk_options(wanted, force=False):
+    """把设置写进 RustDesk，返回原值和目标值不同的项：[(键, 原值, 新值)]。
+
+    force=True 时值已经对了也再写一遍：连不上 --server 的 IPC 时，`rustdesk --option`
+    读到的是 root 配置文件里的值，不代表正在运行的 RustDesk 用的也是这个值。
+    """
+    diffs = []
     for key, value in wanted:
         old = rd_get_option(key)
-        if old == value:
+        if old != value:
+            diffs.append((key, old, value))
+        elif not force:
             continue
         if not rd_set_option(key, value):
             raise ArdError("设置 RustDesk 选项失败：%s=%s" % (key, value))
-        changes.append("RustDesk %s：%s → %s" % (key, old or "（空）", value))
-    step("设置 RustDesk 固定密码")
-    ok, msg = rd_set_password(password, timeout=args.ipc_timeout)
-    if not ok and not xorg_ok:
+    return diffs
+
+
+def set_rustdesk_password(password, timeout, servers, xorg_ok):
+    ok, msg = rd_set_password(password, timeout=timeout)
+    if ok:
+        return
+    if not xorg_ok:
         raise ArdError("RustDesk 没有图形会话，无法设置密码：B 只提供 Wayland 桌面，"
                        "请先在 B 上接显示器并登录桌面，再重新连接")
-    if not ok:
-        raise ArdError("设置 RustDesk 密码失败：%s" % msg)
-    log("RustDesk 固定密码已设置")
-    return rid
+    if not servers:
+        raise ArdError("设置 RustDesk 密码失败：RustDesk 没有启动 --server 进程"
+                       "（B 上没有登录界面或桌面会话？）：%s" % msg)
+    raise ArdError("设置 RustDesk 密码失败：%s" % msg)
+
+
+def configure_rustdesk(args, password, changes, xorg_ok=True):
+    """写入 RustDesk 设置和固定密码，并确认直连端口已经打开。
+
+    返回 (RustDesk ID, 是否在监听, --server 进程)。设置要等 --server 稳定后再写（原因见
+    wait_rustdesk_server）；写完后直连端口打开、且期间 --server 没有重启过，才算写进去了。
+    否则重新写一遍，还不行就重启 RustDesk 服务再写。
+    """
+    wanted = None
+    listening = False
+    servers = []
+    for attempt in range(3):
+        if attempt == 0:
+            step("等待 RustDesk 服务就绪")
+        elif attempt == 1:
+            log("直连端口没有打开（或者 RustDesk 中途重启过），重新写入 RustDesk 设置")
+        else:
+            log("重启 RustDesk 服务后重新写入设置")
+            systemctl("restart", "rustdesk")
+        servers = wait_rustdesk_server(timeout=args.ipc_timeout)
+        if attempt == 0:
+            if servers:
+                log("RustDesk 服务已就绪（--server 以 %s 身份运行）" % describe_servers(servers))
+            else:
+                log("RustDesk 服务还没有启动 --server 进程（B 上可能没有登录界面或桌面会话），继续尝试设置")
+            wanted = rustdesk_options(args)
+            step("设置 RustDesk 选项")
+        diffs = apply_rustdesk_options(wanted, force=attempt > 0)
+        if attempt == 0:
+            for key, old, value in diffs:
+                changes.append("RustDesk %s：%s → %s" % (key, old or "（空）", value))
+            step("设置 RustDesk 固定密码")
+        elif diffs:
+            log("RustDesk 没有保存这些设置，已重新写入：%s" % "、".join(k for k, _, _ in diffs))
+        set_rustdesk_password(password, args.ipc_timeout, servers, xorg_ok)
+        if attempt == 0:
+            log("RustDesk 固定密码已设置")
+            step("检查 RustDesk 直连端口")
+        listening = wait_listening(args.port, timeout=15 if attempt == 0 else 30)
+        same = {s["pid"] for s in servers} == {s["pid"] for s in rustdesk_servers()}
+        if listening and same:
+            break
+    if listening and servers and all(s["uid"] == 0 for s in servers):
+        # 登录界面是 Wayland 时 --server 以 root 身份运行，不和 --service 同步配置：
+        # 设置只存进了配置文件，--service 内存里还是旧的，用户登录后的 --server 会拿到旧设置。
+        # 重启服务，让它重新读取配置文件
+        log("重启 RustDesk 服务，让登录桌面后的 RustDesk 也用上这些设置")
+        systemctl("restart", "rustdesk")
+        servers = wait_rustdesk_server(timeout=args.ipc_timeout)
+        listening = wait_listening(args.port, timeout=30)
+    return rd_get_id(timeout=10), listening, servers
 
 
 def wait_listening(port, timeout=30):
@@ -1146,17 +1282,10 @@ def cmd_configure(args):
         elif user_sessions:
             warnings.append("B 上有用户已登录，显示设置要重启登录界面或重启 B 后才生效")
 
-    rid = configure_rustdesk(args, password, changes, warnings, xorg_ok)
-
-    step("检查 RustDesk 直连端口")
-    listening = wait_listening(args.port, timeout=30)
+    rid, listening, servers = configure_rustdesk(args, password, changes, xorg_ok)
     if not listening:
-        log("直连端口还没有打开，重启 RustDesk 服务后再检查")
-        systemctl("restart", "rustdesk")
-        wait_rustdesk_ipc(timeout=args.ipc_timeout)
-        listening = wait_listening(args.port, timeout=30)
-    if not listening:
-        warnings.append("RustDesk 没有在 %d 端口监听" % args.port)
+        warnings.append("RustDesk 没有在 %d 端口监听%s" % (
+            args.port, "" if servers else "（RustDesk 没有启动 --server 进程，B 上没有登录界面或桌面会话？）"))
 
     state["configured"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
     state["port"] = args.port

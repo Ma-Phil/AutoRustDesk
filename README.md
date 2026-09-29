@@ -246,7 +246,7 @@ python packaging/build.py                          # 打包 Windows / macOS 版�
 
 GitHub Actions 会打好全部安装包，创建一个 Release 草稿，附上各个安装包、单独的离线部署包和校验和（`SHA256SUMS.txt`）。标签必须和程序版本号一致，否则不会创建。在 Releases 页面检查无误后点「发布」即可（网页方式的标签在这时创建）。
 
-端到端测试用 `tests/fakes/make_fake_rustdesk.py` 生成的"假 RustDesk"deb 制作离线包。它的依赖列表和安装脚本与官方包一致，程序本体换成了模拟命令行行为的脚本。测试会在不联网的 Ubuntu 20.04 容器里真实地走一遍离线安装。测试覆盖五种场景：B 用 DHCP、B 的 DHCP 已放弃重试（模拟 NetworkManager，只在网线接上时请求地址）、B 是固定 IP 且有流量、B 是固定 IP 且完全不发报文、程序不退出时拔线换插另一台设备；另外还验证快速连接和重复运行的幂等性。
+端到端测试用 `tests/fakes/make_fake_rustdesk.py` 生成的"假 RustDesk"deb 制作离线包。它的依赖列表和安装脚本与官方包一致，程序本体换成了模拟命令行行为的脚本，也模拟了 RustDesk 1.4 的进程结构（`--service` 启动 `--server`、两者之间的配置同步），在 `--server` 起来之前写的设置会和真实的一样丢掉。测试会在不联网的 Ubuntu 20.04 容器里真实地走一遍离线安装。测试覆盖五种场景：B 用 DHCP、B 的 DHCP 已放弃重试（模拟 NetworkManager，只在网线接上时请求地址）、B 是固定 IP 且有流量、B 是固定 IP 且完全不发报文、程序不退出时拔线换插另一台设备；另外还验证快速连接和重复运行的幂等性。
 
 代码结构：
 
