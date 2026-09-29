@@ -22,6 +22,12 @@ sys.path.insert(0, ROOT)
 
 from autorustdesk import APP_NAME, __version__  # noqa: E402
 
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
 
 def run(cmd, **kw):
     print("+", " ".join(cmd), flush=True)

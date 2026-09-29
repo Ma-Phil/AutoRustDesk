@@ -49,8 +49,21 @@ def selftest() -> int:
     return 0
 
 
+def _utf8_output() -> None:
+    """Windows 上输出被重定向到文件或管道时默认用系统代码页（如 cp1252），中文会报错；改用 UTF-8。"""
+    if sys.platform != "win32":
+        return
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            if stream is not None and not stream.isatty():
+                stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, OSError, ValueError):
+            pass
+
+
 def main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    _utf8_output()
     if argv[:1] == ["helper"]:
         from .helper.server import main as helper_main
 

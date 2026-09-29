@@ -25,6 +25,13 @@ from autorustdesk.helper import dhcp as D  # noqa: E402
 
 FAILURES = []
 
+# CI 里输出是管道，Windows 默认用 cp1252 编码，打印中文会出错
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
 
 def check(cond, what):
     print(("  [通过] " if cond else "  [失败] ") + what, flush=True)
