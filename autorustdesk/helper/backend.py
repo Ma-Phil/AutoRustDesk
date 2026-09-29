@@ -42,6 +42,8 @@ class Backend:
     name = ""
     # 网卡被停用再启用后，DHCP 套接字是否需要重新绑定（Windows 绑定在网卡地址上）
     dhcp_rebind_after_bounce = False
+    # DHCP 广播回复发往本网段广播地址而不是 255.255.255.255（macOS）
+    dhcp_subnet_broadcast = False
 
     def is_admin(self) -> bool:
         raise NotImplementedError

@@ -154,10 +154,14 @@ class DhcpServer:
         reservations: Optional[Dict[str, str]] = None,
         on_event: Optional[EventFn] = None,
         socket_factory: Optional[SocketFactory] = None,
+        subnet_broadcast: bool = False,
     ) -> None:
         self.iface = iface
         # 各系统把套接字限定在直连网卡上的方法不同，由 backend 提供；默认用 Linux 的做法
         self.socket_factory = socket_factory or self._linux_socket
+        # 广播回复发往 255.255.255.255；macOS 上绑定网卡的套接字发不出这个地址（没有路由），
+        # 改发本网段广播地址（在网线上同样是以太网广播，B 一样能收到）
+        self.subnet_broadcast = subnet_broadcast
         self.server_ip = server_ip
         self.network = ipaddress.ip_network("%s/%d" % (server_ip, prefix), strict=False)
         self.pool_start = ipaddress.ip_address(pool_start)
@@ -383,11 +387,29 @@ class DhcpServer:
                 continue
             reply, dest = out
             try:
-                self._sock.sendto(reply.build(), (dest, 68))
+                self._send(reply.build(), dest)
                 self.on_event({"event": "log", "level": "debug", "msg": "DHCP %s %s → %s" % (
                     MSG_NAMES.get(reply.msg_type, "?"), reply.yiaddr, reply.mac)})
             except OSError as e:
                 self.on_event({"event": "log", "level": "error", "msg": "DHCP 发送失败：%s" % e})
+
+    def _send(self, data: bytes, dest: str) -> None:
+        assert self._sock is not None
+        subnet_bcast = str(self.network.broadcast_address)
+        if dest == "255.255.255.255" and self.subnet_broadcast:
+            dest = subnet_bcast
+        try:
+            self._sock.sendto(data, (dest, 68))
+        except OSError:
+            # 一种广播地址发不出去时换另一种
+            if dest == "255.255.255.255":
+                self._sock.sendto(data, (subnet_bcast, 68))
+                self.subnet_broadcast = True
+            elif dest == subnet_bcast:
+                self._sock.sendto(data, ("255.255.255.255", 68))
+                self.subnet_broadcast = False
+            else:
+                raise
 
     def snapshot(self) -> List[Dict]:
         now = time.time()

@@ -4,12 +4,18 @@ Linux 网卡默认都有 fe80:: 链路本地地址，并且会回应组播 ping�
 所以即使 B 是固定 IPv4、我们不知道它的网段，也能通过 IPv6 找到并 SSH 上去。
 """
 
+import errno
 import os
 import socket
 import struct
 import sys
 import time
 from typing import Optional
+
+# 网卡还没有可用的 IPv6 链路本地地址（刚启用、正在做重复地址检测，或者关闭了 IPv6）时
+# 发送会得到这些错误：不算故障，稍后再试
+NOT_READY = {errno.EADDRNOTAVAIL, errno.EINVAL, errno.ENETUNREACH, errno.EHOSTUNREACH,
+             10022, 10049, 10051, 10065}  # 后 4 个是 Windows 的 WSAE* 错误码
 
 ICMP6_ECHO_REQUEST = 128
 ALL_NODES = "ff02::1"
@@ -53,7 +59,7 @@ def probe_all_nodes(ifindex: int, count: int = 2, src_ll: Optional[str] = None) 
 
     回应由链路监听（sniffer）收到并上报为 neighbor 事件，所以这里发完就返回，
     不会阻塞发现流程。src_ll 是本机在该网卡上的 fe80:: 地址（知道时绑定它，
-    保证源地址和校验和一致）。返回发出的报文数。
+    保证源地址和校验和一致）。返回发出的报文数；网卡的 IPv6 还没准备好时返回 0。
     """
     s = socket.socket(socket.AF_INET6, socket.SOCK_RAW, socket.IPPROTO_ICMPV6)
     try:
@@ -67,7 +73,12 @@ def probe_all_nodes(ifindex: int, count: int = 2, src_ll: Optional[str] = None) 
         s.setsockopt(socket.IPPROTO_IPV6, IPV6_MULTICAST_LOOP, 0)
         ident = os.getpid() & 0xFFFF
         for seq in range(1, count + 1):
-            s.sendto(echo_request(ident, seq, src_ll), (ALL_NODES, 0, 0, ifindex))
+            try:
+                s.sendto(echo_request(ident, seq, src_ll), (ALL_NODES, 0, 0, ifindex))
+            except OSError as e:
+                if e.errno in NOT_READY or getattr(e, "winerror", None) in NOT_READY:
+                    return seq - 1
+                raise
             time.sleep(0.05)
         return count
     finally:

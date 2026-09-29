@@ -283,6 +283,7 @@ class Helper:
             req.get("reservations") or {},
             self.event,
             socket_factory=lambda: self.backend.dhcp_socket(iface, req["server_ip"]),
+            subnet_broadcast=self.backend.dhcp_subnet_broadcast,
         )
         server.start()
         self.dhcp = server

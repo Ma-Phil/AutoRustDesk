@@ -312,6 +312,8 @@ def cleanup_all(log: LogFn, runner: Runner = run, state_file: str = STATE_FILE) 
 
 class MacBackend(Backend):
     name = "macos"
+    # 绑定了网卡（IP_BOUND_IF）的套接字发往 255.255.255.255 会报"网络不可达"
+    dhcp_subnet_broadcast = True
 
     def _info(self, iface: str) -> Dict:
         if not iface or "/" in iface:

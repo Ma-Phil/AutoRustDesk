@@ -167,7 +167,12 @@ def test_dhcp_lease_and_ipv6_discovery(packetio):
 
                 r = h.call("probe6", iface=link.a_if, timeout=2)
                 if ipv6_supported() and packetio != "none":
-                    # 发出即返回，B 的回应由链路监听上报
+                    # 发出即返回，B 的回应由链路监听上报。网卡的 fe80:: 地址刚生成时还在做
+                    # 重复地址检测，这时 sent 为 0，稍后再试
+                    deadline = time.time() + 10
+                    while r["ok"] and r["result"]["sent"] == 0 and time.time() < deadline:
+                        time.sleep(0.5)
+                        r = h.call("probe6", iface=link.a_if, timeout=2)
                     assert r["ok"] and r["result"]["sent"] == 2, r
                     neigh = h.wait_event(lambda e: e["event"] == "neighbor" and e["ipv6ll"], timeout=10)
                     assert neigh["mac"] == b_mac

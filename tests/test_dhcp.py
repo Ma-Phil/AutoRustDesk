@@ -110,3 +110,27 @@ def test_pool_exhaustion_returns_none():
     assert s.handle(make_req(D.DISCOVER, mac=MAC_B), now=0)[0].yiaddr == "192.168.77.100"
     s.handle(make_req(D.REQUEST, mac=MAC_B, requested="192.168.77.100", server_id="192.168.77.1"), now=0)
     assert s.handle(make_req(D.DISCOVER, mac=MAC_C), now=1) is None
+
+
+class FakeSock:
+    def __init__(self, fail_on=()):
+        self.fail_on = set(fail_on)
+        self.sent = []
+
+    def sendto(self, data, addr):
+        if addr[0] in self.fail_on:
+            raise OSError(51, "Network is unreachable")
+        self.sent.append(addr)
+
+
+def test_broadcast_falls_back_to_subnet_broadcast():
+    """macOS 上绑定网卡的套接字发不出 255.255.255.255，自动改发本网段广播地址。"""
+    s = make_server()
+    s._sock = FakeSock(fail_on={"255.255.255.255"})
+    s._send(b"x", "255.255.255.255")
+    assert s._sock.sent == [("192.168.77.255", 68)]
+    assert s.subnet_broadcast  # 之后直接用本网段广播
+    s._send(b"x", "255.255.255.255")
+    assert s._sock.sent[-1] == ("192.168.77.255", 68)
+    s._send(b"x", "192.168.77.100")  # 单播不受影响
+    assert s._sock.sent[-1] == ("192.168.77.100", 68)

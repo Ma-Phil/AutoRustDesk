@@ -469,6 +469,8 @@ class Workflow:
         s = self.settings
         start = time.time()
         next_probe = next_scan = 0.0
+        ipv6_sent = False
+        ipv6_errors = 0
         deep_scanned = False
         bounces: List[str] = []
         warned_ssh = False
@@ -483,14 +485,19 @@ class Workflow:
             for t in sorted(hints):
                 if elapsed >= t:
                     self.ui.log(hints.pop(t), "warning")
-            # IPv6 全节点 ping：发出即返回，回应由链路监听收到
+            # IPv6 全节点 ping：发出即返回，回应由链路监听收到。
+            # 网卡的 IPv6 地址刚配置时还不能用（sent 为 0），过一会儿再试；连续出错 3 次才放弃
             if self.ipv6_ok and now >= next_probe:
-                next_probe = now + 3
+                next_probe = now + (3 if ipv6_sent else 1)
                 try:
-                    self.helper.call("probe6", iface=self.iface, timeout=10)
+                    if self.helper.call("probe6", iface=self.iface, timeout=10).get("sent"):
+                        ipv6_sent = True
+                    ipv6_errors = 0
                 except HelperError as e:
-                    self.ipv6_ok = False
-                    self.ui.log("IPv6 探测不可用（%s），改用其它方式发现设备" % e, "debug")
+                    ipv6_errors += 1
+                    if ipv6_errors >= 3:
+                        self.ipv6_ok = False
+                        self.ui.log("IPv6 探测不可用（%s），改用其它方式发现设备" % e, "debug")
             # 直连网段 ARP 扫描（254 个地址约 0.1 秒）：B 已有地址但不发报文时靠它发现
             if now >= next_scan:
                 next_scan = now + (3 if elapsed < 30 else 10)

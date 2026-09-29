@@ -218,7 +218,7 @@ def test_mac_link_up_and_down(tmp_path):
     assert "192.168.77.1/24" in fake.ifs["en5"]["ipv4"]
     assert "169.254.33.44/16" in fake.ifs["en5"]["ipv4"]  # 系统自己的地址不动
     assert fake.fw_apps == {"/Applications/AutoRustDesk.app/x"}
-    rec = json.load(open(state))["en5"]
+    rec = json.load(open(state, encoding="utf-8"))["en5"]
     assert rec["addresses"] == ["192.168.77.1/24"] and rec["fw_app"]
     # 再加一个 B 网段的地址
     assert link.add_address("10.9.8.254/24")
@@ -230,7 +230,7 @@ def test_mac_link_up_and_down(tmp_path):
     link.down()
     assert fake.ifs["en5"]["ipv4"] == ["169.254.33.44/16"]
     assert fake.fw_apps == set()
-    assert json.load(open(state)) == {}
+    assert json.load(open(state, encoding="utf-8")) == {}
 
 
 def test_mac_link_rejects_conflicting_subnet(tmp_path):

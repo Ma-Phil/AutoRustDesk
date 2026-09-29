@@ -196,13 +196,13 @@ def test_dhcp_adapter_becomes_static_and_is_restored(tmp_path):
     eth = fake.adapter("以太网 2")
     assert eth["ipv4"] == ["192.168.77.1/24"] and not eth["dhcp"]
     assert fake.fw_rules == [W.FW_RULE]
-    rec = json.load(open(tmp_path / "links.json"))["以太网 2"]
+    rec = json.load(open(tmp_path / "links.json", encoding="utf-8"))["以太网 2"]
     assert rec["was_dhcp"] and rec["index"] == 12 and rec["guid"] == "{AAAA}"
     assert link.add_address("10.9.8.254/24")
     link.down()
     assert eth["dhcp"] and eth["ipv4"] == ["169.254.33.44/16"]
     assert fake.fw_rules == []
-    assert json.load(open(tmp_path / "links.json")) == {}
+    assert json.load(open(tmp_path / "links.json", encoding="utf-8")) == {}
     # Wi-Fi 没有被碰过
     assert all(c[5] == "name=12" for c in fake.calls if c[:3] == ["netsh", "interface", "ipv4"])
 
