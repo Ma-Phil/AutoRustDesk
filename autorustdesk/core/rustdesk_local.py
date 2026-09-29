@@ -6,6 +6,8 @@ import subprocess
 import sys
 from typing import List, Optional
 
+from .builtin import builtin_client
+
 LINUX_CANDIDATES = ["/usr/bin/rustdesk", "/usr/share/rustdesk/rustdesk", "/usr/local/bin/rustdesk"]
 FLATPAK_ID = "com.rustdesk.RustDesk"
 
@@ -52,7 +54,8 @@ def find_client(custom: str = "") -> Optional[List[str]]:
                             stderr=subprocess.DEVNULL).returncode
         if rc == 0:
             return ["flatpak", "run", FLATPAK_ID]
-    return None
+    # 最后用程序自带的 RustDesk（完整版安装包里有）
+    return builtin_client()
 
 
 def connect_command(prefix: List[str], target: str, password: str) -> List[str]:

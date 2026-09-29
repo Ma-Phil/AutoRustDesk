@@ -1,0 +1,22 @@
+AutoRustDesk 第三方软件说明
+==========================
+
+AutoRustDesk 的完整离线版安装包里带有以下第三方软件的官方原版文件，均未做任何修改。
+
+1. RustDesk（https://rustdesk.com）
+   - 电脑 B 用的 rustdesk-<版本>-x86_64.deb（在离线部署包里）
+   - 电脑 A 用的 RustDesk 客户端（Windows 为 exe，macOS 为 RustDesk.app，Linux 为 AppImage）
+   许可证：GNU Affero General Public License v3.0（AGPL-3.0）
+   源代码：https://github.com/rustdesk/rustdesk （对应版本的标签）
+   版权归 RustDesk 团队所有。
+
+2. Ubuntu 软件包（在离线部署包里，供电脑 B 离线安装 RustDesk 的依赖和虚拟显示驱动）
+   来源：Ubuntu 官方软件源（http://archive.ubuntu.com/ubuntu），版本 20.04 / 22.04 / 24.04
+   许可证：每个软件包各自的许可证，见包内 /usr/share/doc/<包名>/copyright
+   源代码：https://packages.ubuntu.com 或 Ubuntu 软件源的 source 部分（apt-get source <包名>）
+
+3. AutoRustDesk 程序本身用到的开源库（已打包在程序里）
+   - Qt 6 / PySide6（LGPL-3.0）：https://www.qt.io 、https://wiki.qt.io/Qt_for_Python
+   - Paramiko（LGPL-2.1）、cryptography（Apache-2.0 / BSD）、bcrypt（Apache-2.0）、
+     PyNaCl（Apache-2.0）、psutil（BSD-3-Clause）、zstandard（BSD-3-Clause）
+   - Python（PSF License）

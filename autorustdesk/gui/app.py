@@ -79,6 +79,7 @@ def run() -> int:
         show_error_without_qt(problem)
         return 1
     try:
+        from PySide6.QtGui import QIcon
         from PySide6.QtWidgets import QApplication
     except ImportError as e:
         show_error_without_qt(
@@ -92,6 +93,10 @@ def run() -> int:
     app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setOrganizationName(APP_NAME)
+    app.setDesktopFileName("autorustdesk")  # Linux 任务栏按 autorustdesk.desktop 显示图标
+    icon = os.path.join(os.path.dirname(os.path.abspath(__file__)), "autorustdesk.png")
+    if os.path.exists(icon):
+        app.setWindowIcon(QIcon(icon))
     # Ctrl+C 能退出
     signal.signal(signal.SIGINT, signal.SIG_DFL)
     win = MainWindow()

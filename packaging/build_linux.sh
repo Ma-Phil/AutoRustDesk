@@ -54,6 +54,7 @@ pyinstaller --noconfirm --clean --name AutoRustDesk --windowed \
     --paths . \
     --collect-submodules autorustdesk \
     --add-data "autorustdesk/remote/ard_remote.py:autorustdesk/remote" \
+    --add-data "autorustdesk/gui/autorustdesk.png:autorustdesk/gui" \
     --exclude-module tkinter \
     packaging/entry.py
 

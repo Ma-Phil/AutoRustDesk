@@ -36,6 +36,11 @@ class HelperError(Exception):
 def helper_base_command() -> List[str]:
     """启动助手的命令（不含提权）。"""
     if getattr(sys, "frozen", False):
+        appimage = os.environ.get("APPIMAGE")
+        if appimage and os.path.isfile(appimage):
+            # AppImage 运行时挂载在只有当前用户能访问的临时目录里，root 进不去，
+            # 所以让 pkexec 直接运行 AppImage 文件本身（以 root 身份重新挂载）
+            return [appimage, "helper"]
         return [sys.executable, "helper"]
     script = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                           "helper", "__main__.py")

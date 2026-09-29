@@ -12,3 +12,8 @@ dist/
 .venv-build/
 *.spec
 !packaging/AutoRustDesk.spec
+dl/
+extras/
+*.AppImage
+*.dmg
+packaging/windows/ChineseSimplified.isl

@@ -1,5 +1,8 @@
-# 在真实的 Linux / Windows / macOS 上测试，并打包 Windows 和 macOS 版。
-# 打好的包在每次运行的 Artifacts 里下载。
+# 在真实的 Linux / Windows / macOS 上测试，并打包三个系统的完整离线版：
+#   程序 + 电脑 B 的离线部署包（Ubuntu 20.04/22.04/24.04）+ 电脑 A 用的 RustDesk 客户端，
+#   装好后电脑 A 全程不用联网。
+# 打好的包在每次运行的 Artifacts 里下载；推送 v* 标签时自动创建 Release 草稿（确认后手动发布）。
+#
 # pip 用 --prefer-binary：cryptography 新版本没有 Intel Mac 的预编译包，从源码编译会链接
 # Homebrew 的 OpenSSL，打包后与 Python 自带的 libssl 同名冲突，程序启动即报错。
 name: 测试与打包
@@ -8,6 +11,10 @@ on:
   push:
     paths-ignore: ["**.md", "docs/**"]
   workflow_dispatch:
+    inputs:
+      rustdesk_version:
+        description: 打包进去的 RustDesk 版本（latest 为最新正式版，也可以写 1.4.2 这样的版本号）
+        default: latest
 
 permissions:
   contents: read
@@ -15,6 +22,9 @@ permissions:
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
+
+env:
+  RUSTDESK_VERSION: ${{ github.event.inputs.rustdesk_version || 'latest' }}
 
 jobs:
   linux:
@@ -36,8 +46,45 @@ jobs:
       - name: 网络集成测试（虚拟网线；AF_PACKET / libpcap / 不抓包三种方式）
         run: sudo "$(which python)" -m pytest -q tests/integration
 
+  offline-bundle:
+    name: 电脑 B 的离线部署包
+    runs-on: ubuntu-24.04
+    outputs:
+      rustdesk: ${{ steps.deb.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --prefer-binary zstandard
+      - name: 下载 RustDesk 官方 deb
+        id: deb
+        run: python packaging/fetch_rustdesk.py "$RUSTDESK_VERSION" deb dl --github-output
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - name: 缓存下载过的 Ubuntu 软件包
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/autorustdesk
+          key: ubuntu-debs-${{ steps.deb.outputs.version }}-${{ github.run_id }}
+          restore-keys: ubuntu-debs-
+      - name: 制作离线包（Ubuntu 20.04 / 22.04 / 24.04）
+        run: |
+          python -m autorustdesk bundle build "${{ steps.deb.outputs.file }}" \
+            --ubuntu 20.04,22.04,24.04 --mirror http://azure.archive.ubuntu.com/ubuntu \
+            -o "dist/autorustdesk-bundle-rustdesk-${{ steps.deb.outputs.version }}-ubuntu-20.04-22.04-24.04.tar"
+          python -m autorustdesk bundle info dist/*.tar
+      - uses: actions/upload-artifact@v4
+        with:
+          name: offline-bundle
+          path: dist/*.tar
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
   windows:
     name: Windows 测试与打包
+    needs: offline-bundle
     runs-on: windows-latest
     env:
       PYTHONUTF8: "1"
@@ -58,15 +105,36 @@ jobs:
       - name: 网络助手日志
         if: always()
         run: Get-Content "$env:ProgramData\AutoRustDesk\helper.log" -ErrorAction SilentlyContinue
-      - name: 打包
-        run: python packaging/build.py
+      - uses: actions/download-artifact@v4
+        with:
+          name: offline-bundle
+          path: extras
+      - name: 下载 RustDesk 官方 Windows 版（电脑 A 用）
+        run: python packaging/fetch_rustdesk.py "${{ needs.offline-bundle.outputs.rustdesk }}" windows extras
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - name: 安装 Inno Setup
+        run: choco install innosetup -y --no-progress
+      - name: 下载 Inno Setup 简体中文语言文件（非官方翻译；下载不到时安装向导只有英文）
+        shell: bash
+        continue-on-error: true
+        run: >-
+          curl -fsSL --retry 3 -o packaging/windows/ChineseSimplified.isl
+          https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/Unofficial/ChineseSimplified.isl
+      - name: 打包（安装程序）
+        shell: bash
+        run: python packaging/build.py --bundle extras/*.tar --client extras/rustdesk-*.exe
       - uses: actions/upload-artifact@v4
         with:
           name: AutoRustDesk-windows-x64
-          path: dist/*.zip
+          path: dist/AutoRustDesk-*-windows-x64-setup.exe
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
 
   macos:
     name: macOS 测试与打包（${{ matrix.arch }}）
+    needs: offline-bundle
     strategy:
       fail-fast: false
       matrix:
@@ -90,17 +158,72 @@ jobs:
       - name: 网络助手日志
         if: always()
         run: sudo cat /var/run/autorustdesk/helper.log || true
-      - name: 打包
-        run: python packaging/build.py
+      - uses: actions/download-artifact@v4
+        with:
+          name: offline-bundle
+          path: extras
+      - name: 下载 RustDesk 官方 macOS 版（电脑 A 用）
+        run: python packaging/fetch_rustdesk.py "${{ needs.offline-bundle.outputs.rustdesk }}" macos-${{ matrix.arch }} extras
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - name: 打包（dmg 安装盘）
+        run: python packaging/build.py --bundle extras/*.tar --client extras/rustdesk-*.dmg
       - uses: actions/upload-artifact@v4
         with:
           name: AutoRustDesk-macos-${{ matrix.arch }}
-          path: dist/*.zip
+          path: dist/*.dmg
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+  linux-package:
+    name: Linux 打包（deb / AppImage）
+    needs: offline-bundle
+    runs-on: ubuntu-24.04
+    # 在 Ubuntu 20.04 里打包，打出来的程序在 20.04 及以后的版本上都能运行
+    container: ubuntu:20.04
+    steps:
+      - name: 安装打包工具
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+            git ca-certificates file python3 python3-venv libpython3.8 binutils \
+            libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 \
+            libxcb-xinerama0 libxcb-xkb1 libxcb-randr0 libxcb-shape0 libxkbcommon-x11-0 libxkbcommon0 \
+            libgl1 libegl1 libfontconfig1 libdbus-1-3 libglib2.0-0 libgssapi-krb5-2
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: offline-bundle
+          path: extras
+      - name: 下载 RustDesk 官方 AppImage（电脑 A 用）
+        run: python3 packaging/fetch_rustdesk.py "${{ needs.offline-bundle.outputs.rustdesk }}" appimage extras
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - name: 打包程序
+        run: bash packaging/build_linux.sh
+      - name: 制作 deb 和 AppImage
+        run: python3 packaging/linux_packages.py --bundle extras/*.tar --client extras/rustdesk-*.AppImage
+      - name: 自检：安装 deb 后运行，直接运行 AppImage
+        run: |
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ./dist/autorustdesk_*_amd64.deb
+          QT_QPA_PLATFORM=offscreen AUTORUSTDESK_CONFIG_DIR=/tmp/cfg1 autorustdesk selftest
+          APPIMAGE_EXTRACT_AND_RUN=1 QT_QPA_PLATFORM=offscreen AUTORUSTDESK_CONFIG_DIR=/tmp/cfg2 \
+            ./dist/AutoRustDesk-*-x86_64.AppImage selftest
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AutoRustDesk-linux-x86_64
+          path: |
+            dist/*.deb
+            dist/*.AppImage
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
 
   release:
-    name: 发布到 Releases（推送 v* 标签时）
+    name: 创建 Release 草稿（推送 v* 标签时）
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [linux, windows, macos]
+    needs: [linux, offline-bundle, windows, macos, linux-package]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -109,7 +232,21 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
+      - name: 计算校验和
+        run: cd artifacts && sha256sum * > SHA256SUMS.txt && ls -la
       - uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/*.zip
+          draft: true
+          files: artifacts/*
           generate_release_notes: true
+          body: |
+            完整离线版：程序 + 电脑 B 的离线部署包（Ubuntu 20.04 / 22.04 / 24.04）+ 电脑 A 用的 RustDesk 客户端（RustDesk ${{ needs.offline-bundle.outputs.rustdesk }}），装好后电脑 A 全程不用联网。
+
+            | 电脑 A | 下载 |
+            |---|---|
+            | Windows 10 / 11 | `AutoRustDesk-*-windows-x64-setup.exe` |
+            | Mac（Apple 芯片） | `AutoRustDesk-*-macos-arm64.dmg`（把两个应用都拖进"应用程序"） |
+            | Mac（Intel） | `AutoRustDesk-*-macos-x86_64.dmg` |
+            | Ubuntu 20.04 及以上 | `autorustdesk_*_amd64.deb`（`sudo apt install ./文件名`）或 `AutoRustDesk-*-x86_64.AppImage` |
+
+            `autorustdesk-bundle-*.tar` 是单独的电脑 B 离线部署包（已经包含在上面的安装包里，升级程序或源码运行时用）。`SHA256SUMS.txt` 为校验和。

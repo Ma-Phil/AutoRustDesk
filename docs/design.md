@@ -207,9 +207,29 @@ autorustdesk-bundle/
 | IPv6 探测 | 原始套接字 | 原始套接字（自己算校验和） | 原始套接字 |
 | 电子拔插 | 重新协商链路 / ip link | 停用再启用网卡 | ifconfig down/up |
 | 防火墙 | ufw（启用时） | 添加入站规则 | socketfilterfw（启用时） |
-| 打包 | PyInstaller（build_linux.sh） | PyInstaller：AutoRustDesk.exe + AutoRustDesk-cli.exe | PyInstaller：AutoRustDesk.app |
+| 打包 | PyInstaller → deb、AppImage | PyInstaller：AutoRustDesk.exe + AutoRustDesk-cli.exe → Inno Setup 安装程序 | PyInstaller：AutoRustDesk.app → dmg |
 
 `helper/` 的命令协议与平台无关，`server.py` 只通过 `Backend` 接口操作网卡。
+
+### 6.1 完整离线版
+
+发布的安装包自带电脑 B 的离线部署包和电脑 A 用的 RustDesk 官方客户端，装好后 A 全程不用联网。
+
+- **程序怎么找到自带的资源**（`core/builtin.py`）：在程序目录（PyInstaller 的 `sys._MEIPASS` 和可执行文件所在目录）下找 `bundle/*.tar` 和 `rustdesk/`。
+  - 离线包：用户没选、或选过的文件已经不在时，用自带的；
+  - RustDesk 客户端：优先用本机已安装的，找不到时才用自带的。Windows 为 `rustdesk/rustdesk-<版本>-x86_64.exe`（官方的免安装版，直接运行）；Linux 为官方 AppImage（加 `--appimage-extract-and-run`，不依赖 FUSE）；macOS 为安装盘里与本程序并列的 `RustDesk.app`（保留官方签名，用户一起拖进「应用程序」）。
+- **各系统的安装包**：
+
+| | 安装包 | 说明 |
+|---|---|---|
+| Windows | Inno Setup 安装程序 | 默认装在当前用户目录，不需要管理员权限（也可以选择为所有用户安装）；离线包放在安装目录的 `bundle/` 下 |
+| macOS | dmg（arm64、x86_64 各一个） | 离线包在签名前放进 `AutoRustDesk.app/Contents/Resources/bundle/`；dmg 里放本程序、官方的 `RustDesk.app` 和「应用程序」快捷方式 |
+| Ubuntu | deb | 装到 `/opt/autorustdesk`，带应用菜单项、图标、`/usr/bin/autorustdesk`，以及 polkit 策略（授权框显示本程序的说明，授权在一段时间内有效） |
+| Ubuntu | AppImage | 单个文件。以 root 运行网络助手时，pkexec 执行的是 AppImage 文件本身（`$APPIMAGE`）：AppImage 挂载的目录只有当前用户能访问，root 进不去 |
+
+- **Ubuntu 版在 Ubuntu 20.04 的容器里打包**，打出来的程序在 20.04 及以后的版本上都能运行（glibc 向后兼容）。
+- **Npcap 不能打包**：它的许可证不允许随其它软件分发，只能让用户自己装（不装也能用，见 2.3）。
+- **CI**（`.github/workflows/build.yml`）：先用 `packaging/fetch_rustdesk.py` 下载 RustDesk 官方最新正式版（按 GitHub 给出的 SHA256 校验），制作一份 Ubuntu 20.04 / 22.04 / 24.04 的离线包，三个系统的打包任务共用这一份；每个安装包打好后运行自检（`selftest` 报告自带的离线包和客户端；deb 在 Ubuntu 20.04 里真实安装后运行）。推送 `v*` 标签时，把全部安装包、单独的离线包和 `SHA256SUMS.txt` 放进 Release 草稿，人工确认后发布。
 
 ## 7. 测试
 

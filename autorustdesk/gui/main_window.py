@@ -31,6 +31,7 @@ from .. import APP_NAME, __version__
 from ..bundle import Bundle, BundleError
 from ..core import nic as nicmod
 from ..core import rustdesk_local
+from ..core.builtin import builtin_bundle
 from ..core.devices import DeviceRegistry
 from ..core.paths import log_dir
 from ..core.settings import Settings
@@ -317,6 +318,15 @@ class MainWindow(QMainWindow):
     def _load_bundle(self, path: str, quiet: bool = False) -> bool:
         if not path:
             self.bundle_edit.setText("")
+            builtin = builtin_bundle()
+            if builtin:
+                try:
+                    b = Bundle.open(builtin)
+                    self.bundle_edit.setPlaceholderText("使用程序自带的离线包（也可以另选）")
+                    self.bundle_label.setText("自带：" + b.summary())
+                    return True
+                except BundleError:
+                    pass
             self.bundle_label.setText("B 上已经装有 RustDesk 时可以不选。")
             return False
         try:

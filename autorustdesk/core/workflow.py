@@ -22,6 +22,7 @@ from ..debian import version_compare
 from ..helper.state import STATE_FILE as STALE_STATE_FILE
 from . import nic as nicmod
 from . import rustdesk_local
+from .builtin import builtin_bundle
 from .devices import DeviceRegistry, generate_password, now_str
 from .helper_client import HelperClient, HelperError
 from .settings import Settings, choose_subnet
@@ -301,10 +302,17 @@ class Workflow:
         return info
 
     def bundle(self) -> Optional[Bundle]:
-        if not self.settings.bundle_path:
+        """用户选的离线包；没选（或选的文件已经不在了）时用程序自带的。"""
+        path = self.settings.bundle_path
+        builtin = builtin_bundle()
+        if path and not os.path.exists(path) and builtin:
+            self.ui.log("之前选的离线包 %s 已经不在了，改用程序自带的离线包" % path, "warning")
+            path = ""
+        path = path or builtin
+        if not path:
             return None
         try:
-            return Bundle.open(self.settings.bundle_path)
+            return Bundle.open(path)
         except BundleError as e:
             raise WorkflowError(str(e))
 
