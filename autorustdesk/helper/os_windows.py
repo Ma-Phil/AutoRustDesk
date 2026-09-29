@@ -147,10 +147,11 @@ class WinLink(Link):
         return any(ping(g, self.run) for g in gateways)
 
     def _wait_address(self, ip: str, timeout: float) -> bool:
+        """等地址生效（重复地址检测结束，可以绑定使用）。"""
         deadline = time.time() + timeout
         while True:
             a = self.adapter_fn(self.iface)
-            if a and any(c.split("/")[0] == ip for c in a["ipv4"]):
+            if a and any(c.split("/")[0] == ip for c in a.get("ipv4_ready", a["ipv4"])):
                 return True
             if time.time() >= deadline:
                 return False

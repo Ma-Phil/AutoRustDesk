@@ -54,15 +54,16 @@ def test_adapter_info_parses_addresses_gateways_and_flags():
     a.Flags = N.IP_ADAPTER_DHCP_ENABLED | 0x80
     a.ReceiveLinkSpeed = 1000 * 1000 * 1000
 
-    addrs = [(sockaddr4("10.20.30.40"), 24, N.IP_PREFIX_ORIGIN_DHCP),
-             (sockaddr4("192.168.77.1"), 24, 1),
-             (sockaddr6("fe80::10f3:5b1f:9d2e:abcd", 12), 64, 4)]
+    addrs = [(sockaddr4("10.20.30.40"), 24, N.IP_PREFIX_ORIGIN_DHCP, N.IP_DAD_STATE_PREFERRED),
+             (sockaddr4("192.168.77.1"), 24, 1, 1),  # 刚配置，还在重复地址检测（暂定）
+             (sockaddr6("fe80::10f3:5b1f:9d2e:abcd", 12), 64, 4, N.IP_DAD_STATE_PREFERRED)]
     nodes = []
-    for buf, plen, origin in addrs:
+    for buf, plen, origin, dad in addrs:
         u = N.IP_ADAPTER_UNICAST_ADDRESS()
         u.Address.lpSockaddr = ctypes.addressof(buf)
         u.OnLinkPrefixLength = plen
         u.PrefixOrigin = origin
+        u.DadState = dad
         nodes.append(u)
         keep.append(buf)
     for u, nxt in zip(nodes, nodes[1:]):
@@ -83,6 +84,7 @@ def test_adapter_info_parses_addresses_gateways_and_flags():
     assert info["up"] and info["dhcp"] and info["speed"] == 1000
     assert info["ipv4"] == ["10.20.30.40/24", "192.168.77.1/24"]
     assert info["ipv4_dhcp"] == ["10.20.30.40/24"]
+    assert info["ipv4_ready"] == ["10.20.30.40/24"]  # 暂定的地址还不能绑定
     assert info["ipv6ll"] == ["fe80::10f3:5b1f:9d2e:abcd"]
     assert info["gateways"] == ["10.20.30.1"]
     assert info["dhcp_server"] == "10.20.30.1"

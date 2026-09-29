@@ -32,6 +32,9 @@ IF_TYPE_IEEE80211 = 71
 IF_OPER_STATUS_UP = 1
 IP_ADAPTER_DHCP_ENABLED = 0x4
 IP_PREFIX_ORIGIN_DHCP = 3
+# IP_DAD_STATE：地址刚配置时先是"暂定"（重复地址检测中），之后才能绑定使用
+IP_DAD_STATE_DEPRECATED = 3
+IP_DAD_STATE_PREFERRED = 4
 
 # NL_NEIGHBOR_STATE
 NLNS_UNREACHABLE, NLNS_INCOMPLETE, NLNS_PROBE, NLNS_DELAY, NLNS_STALE, NLNS_REACHABLE, NLNS_PERMANENT = range(7)
@@ -197,7 +200,7 @@ def adapter_info(a: IP_ADAPTER_ADDRESSES) -> Dict:
         "up": a.OperStatus == IF_OPER_STATUS_UP,
         "dhcp": bool(a.Flags & IP_ADAPTER_DHCP_ENABLED),
         "speed": a.ReceiveLinkSpeed // 1000000 if 0 < a.ReceiveLinkSpeed < (1 << 62) else 0,
-        "ipv4": [], "ipv4_dhcp": [], "ipv6ll": [], "ipv6": [], "gateways": [],
+        "ipv4": [], "ipv4_ready": [], "ipv4_dhcp": [], "ipv6ll": [], "ipv6": [], "gateways": [],
         "dhcp_server": sockaddr_ip(a.Dhcpv4Server.lpSockaddr) or "",
     }
     u = a.FirstUnicastAddress
@@ -207,6 +210,8 @@ def adapter_info(a: IP_ADAPTER_ADDRESSES) -> Dict:
         if ip and ":" not in ip:
             cidr = "%s/%d" % (ip, ua.OnLinkPrefixLength)
             info["ipv4"].append(cidr)
+            if ua.DadState in (IP_DAD_STATE_PREFERRED, IP_DAD_STATE_DEPRECATED):
+                info["ipv4_ready"].append(cidr)
             if ua.PrefixOrigin == IP_PREFIX_ORIGIN_DHCP:
                 info["ipv4_dhcp"].append(cidr)
         elif ip:

@@ -285,7 +285,7 @@ class Helper:
             socket_factory=lambda: self.backend.dhcp_socket(iface, req["server_ip"]),
             subnet_broadcast=self.backend.dhcp_subnet_broadcast,
         )
-        server.start()
+        server.start(retry_for=10)
         self.dhcp = server
         self.log("DHCP 服务已在 %s 上启动（%s - %s，不下发网关/DNS）" % (
             iface, req["pool_start"], req["pool_end"]))

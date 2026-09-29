@@ -324,11 +324,17 @@ class DhcpServer:
             raise
         return s
 
-    def start(self) -> None:
-        try:
-            s = self.socket_factory()
-        except OSError as e:
-            raise OSError("无法监听 DHCP 端口 67（可能有别的 DHCP 服务在运行）：%s" % e)
+    def start(self, retry_for: float = 0.0) -> None:
+        """打开套接字开始服务。retry_for：地址刚配置、暂时不能绑定时，最多重试这么多秒。"""
+        deadline = time.time() + retry_for
+        while True:
+            try:
+                s = self.socket_factory()
+                break
+            except OSError as e:
+                if time.time() >= deadline:
+                    raise OSError("无法监听 DHCP 端口 67（可能有别的 DHCP 服务在运行）：%s" % e)
+                time.sleep(0.5)
         s.settimeout(0.5)
         self._sock = s
         self._stop.clear()
@@ -338,16 +344,8 @@ class DhcpServer:
     def restart(self, timeout: float = 15.0) -> None:
         """重新打开套接字（网卡被停用再启用后，绑定在网卡地址上的套接字会失效）。已分配的地址保留。"""
         self.stop()
-        deadline = time.time() + timeout
-        while True:
-            try:
-                self.start()
-                return
-            except OSError:
-                # 网卡刚启用时地址还没生效（重复地址检测），稍等再试
-                if time.time() >= deadline:
-                    raise
-                time.sleep(0.5)
+        # 网卡刚启用时地址还没生效（重复地址检测），稍等再试
+        self.start(retry_for=timeout)
 
     def stop(self) -> None:
         self._stop.set()
