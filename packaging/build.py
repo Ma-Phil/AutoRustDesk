@@ -1,7 +1,10 @@
 """打包 Windows / macOS 版（在对应的系统上运行）：
 
-    pip install -r requirements.txt pyinstaller
+    pip install --prefer-binary -r requirements.txt pyinstaller
     python packaging/build.py
+
+--prefer-binary 不能省：cryptography 新版本没有 Intel Mac 的预编译包，从源码编译的版本
+打包后会因为 OpenSSL 库冲突无法加载（打包后的自检会报错）。
 
 输出：
     Windows：dist/AutoRustDesk-<版本>-windows-x64.zip   解压后运行 AutoRustDesk.exe
