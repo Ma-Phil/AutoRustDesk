@@ -8,6 +8,11 @@
 
 import argparse
 import sys
+import warnings
+
+# Ubuntu 20.04 的 Python 是 3.8，cryptography（paramiko 依赖）每次启动都会提示
+# "Python 3.8 is no longer supported"。只是提醒，不影响使用，不显示给用户。
+warnings.filterwarnings("ignore", message=r".*Python 3\.8 is no longer supported.*")
 
 
 def main(argv=None) -> int:

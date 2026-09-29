@@ -54,16 +54,25 @@
 **方式一：打包版（推荐，免装 Python 依赖）**
 
 ```bash
-bash packaging/build_linux.sh          # 在一台 Ubuntu 上打包一次
+bash packaging/build_linux.sh          # 在一台 Ubuntu 上打包一次（需要联网）
 tar xzf dist/AutoRustDesk-*-linux-x86_64.tar.gz
 cd AutoRustDesk && ./AutoRustDesk      # 或运行 ./install_desktop_entry.sh 添加到应用菜单
 ```
+
+打包前，脚本会检查打包机上的系统库。缺什么，它就打印对应的安装命令，例如：
+
+```bash
+sudo apt install libxcb-cursor0
+```
+
+这些库会一起打进程序包，所以把包拷到其它 Ubuntu 电脑上解压就能直接运行，那台电脑不需要再装。
 
 **方式二：源码运行**
 
 ```bash
 sudo apt install python3-venv libxcb-cursor0
 python3 -m venv .venv
+.venv/bin/pip install --upgrade pip    # Ubuntu 20.04 自带的 pip 太旧，装不上新版 PySide6
 .venv/bin/pip install -r requirements.txt
 .venv/bin/python -m autorustdesk
 ```
@@ -102,6 +111,13 @@ python3 -m venv .venv
 撤销系统层面的修改（不卸载 RustDesk）：`sudo python3 /usr/local/lib/autorustdesk/ard_remote.py revert`，然后重启 B。
 
 ## 常见问题
+
+**启动时报 `xcb-cursor0 or libxcb-cursor0 is needed`，然后"已放弃 (核心已转储)"**
+
+图形界面库 Qt 从 6.5 版开始，在 X11 桌面下需要系统库 `libxcb-cursor0`，而 Ubuntu 默认没有安装。
+
+- 立即解决：执行 `sudo apt install libxcb-cursor0`。
+- 新版本的程序：打包时会把这个库打进包里；源码运行缺库时，会给出上面这条提示，不会再崩溃。
 
 **找不到电脑 B**
 - 确认网线两头的网口指示灯亮，B 已开机。
