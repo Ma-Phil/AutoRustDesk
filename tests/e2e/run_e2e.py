@@ -11,6 +11,7 @@
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -21,7 +22,7 @@ ROOT = os.path.dirname(os.path.dirname(HERE))
 IMAGE = "ard-fakeb:focal"
 CONTAINER = "ard-fakeb-e2e"
 A_IF, B_IF = "ardA1", "ardB1"
-SCENARIOS = ["dhcp", "static", "silent"]
+SCENARIOS = ["dhcp", "idle", "static", "silent"]
 STATIC_IP = {"static": "10.9.8.7", "silent": "192.168.1.50"}
 
 
@@ -48,8 +49,17 @@ def setup_b(scenario):
     dexec("ip", "link", "set", B_IF, "up")
     sh("ip", "link", "set", A_IF, "up")
     if scenario == "dhcp":
-        # 和 Ubuntu 桌面版默认一样：网口用 DHCP 自动获取地址
+        # 网口用 DHCP 自动获取地址，dhclient 会一直重试
         sh("docker", "exec", "-d", CONTAINER, "dhclient", "-v", B_IF)
+    elif scenario == "idle":
+        # 像 NetworkManager 那样：接上网线时请求一次，失败后就不再重试，
+        # 只有网线重新接上才会再请求。等第一次请求失败后再开始测试。
+        sh("docker", "exec", "-d", CONTAINER, "fake-nm-dhcp", B_IF)
+        deadline = time.time() + 30
+        while "No DHCPOFFERS" not in dexec("cat", "/var/log/fake-nm.log", check=False):
+            if time.time() > deadline:
+                raise RuntimeError("fake-nm-dhcp 的第一次请求没有按预期失败")
+            time.sleep(1)
     elif scenario == "static":
         # 固定 IP，并模拟 B 平时会发出的流量（访问网关时发 ARP）
         dexec("ip", "addr", "add", STATIC_IP[scenario] + "/24", "dev", B_IF)
@@ -174,6 +184,13 @@ def main():
         try:
             rc, out = run_cli(home, ["--bundle", bundle])
             check(rc == 0 and "完成：地址 192.168.77." in out, "完整流程成功")
+            m = re.search(r"发现电脑 B：.*（用时 (\d+) 秒）", out)
+            check(m is not None, "发现电脑 B 用时 %s 秒" % (m.group(1) if m else "?"))
+            if scenario == "idle":
+                check("相当于自动拔插网线" in out, "B 的 DHCP 已放弃重试，通过电子拔插让它重新请求")
+                check(int(m.group(1)) <= 30, "发现用时不超过 30 秒")
+                attempts = dexec("cat", "/var/log/fake-nm.log").count("网线接上，请求地址")
+                check(attempts >= 2, "B 在网线“重新接上”后又请求了地址（共 %d 次）" % attempts)
             verify_b(scenario, home)
             rc, out = run_cli(home, ["--quick"])
             check(rc == 0 and "已配置过，直接连接" in out, "快速连接跳过了安装和配置")

@@ -119,9 +119,9 @@ python3 -m venv .venv
 - 立即解决：执行 `sudo apt install libxcb-cursor0`。
 - 新版本的程序：打包时会把这个库打进包里；源码运行缺库时，会给出上面这条提示，不会再崩溃。
 
-**找不到电脑 B**
+**找不到电脑 B / 发现 B 很慢**
 - 确认网线两头的网口指示灯亮，B 已开机。
-- B 的网口是自动获取 IP（DHCP）时，把网线拔下再插上，B 会立即重新获取地址。
+- B 的 DHCP 可能已经放弃重试。Ubuntu 的 NetworkManager 连续失败几次后，会**停 5 分钟**才再试；只有网线重新接上时才会立刻重试。所以 5 秒内还没收到 B 的地址请求时，程序会让 A 的网口断开再接上一次（"电子拔插网线"），B 一般几秒内就会来要地址。25 秒还不行会再做一次更长的断开。仍然找不到时，可以手动拔插网线试试。
 - B 是固定 IP 时，程序会自动扫描常见网段。如果 B 的网口被禁用，需要在 B 上启用。
 
 **发现了 B，但 SSH 连不上**：B 需要安装并启动 `openssh-server`。Ubuntu 桌面版默认没有安装，需要先在 B 上执行一次 `sudo apt install openssh-server`（离线时可用 U 盘拷贝 deb 安装）。
@@ -155,7 +155,7 @@ sudo python3 -m pytest tests/integration           # 用网络命名空间模拟
 sudo python3 -m tests.e2e.run_e2e --bundle x.tar   # 端到端：A ⇄ 虚拟网线 ⇄ Ubuntu 20.04 容器（需要 Docker）
 ```
 
-端到端测试用 `tests/fakes/make_fake_rustdesk.py` 生成的"假 RustDesk"deb 制作离线包。它的依赖列表和安装脚本与官方包一致，程序本体换成了模拟命令行行为的脚本。测试会在不联网的 Ubuntu 20.04 容器里真实地走一遍离线安装。测试覆盖四种场景：B 用 DHCP、B 是固定 IP 且有流量、B 是固定 IP 且完全不发报文、程序不退出时拔线换插另一台设备；另外还验证快速连接和重复运行的幂等性。
+端到端测试用 `tests/fakes/make_fake_rustdesk.py` 生成的"假 RustDesk"deb 制作离线包。它的依赖列表和安装脚本与官方包一致，程序本体换成了模拟命令行行为的脚本。测试会在不联网的 Ubuntu 20.04 容器里真实地走一遍离线安装。测试覆盖五种场景：B 用 DHCP、B 的 DHCP 已放弃重试（模拟 NetworkManager，只在网线接上时请求地址）、B 是固定 IP 且有流量、B 是固定 IP 且完全不发报文、程序不退出时拔线换插另一台设备；另外还验证快速连接和重复运行的幂等性。
 
 代码结构：
 

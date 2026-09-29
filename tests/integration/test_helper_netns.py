@@ -118,11 +118,10 @@ def test_dhcp_lease_and_ipv6_discovery():
 
                 r = h.call("probe6", iface=link.a_if, timeout=2)
                 if ipv6_supported():
-                    assert r["ok"], r
-                    assert r["result"]["responders"], r
+                    # 发出即返回，B 的回应由链路监听上报
+                    assert r["ok"] and r["result"]["sent"] == 2, r
                     neigh = h.wait_event(lambda e: e["event"] == "neighbor" and e["ipv6ll"], timeout=10)
                     assert neigh["mac"] == b_mac
-                    assert neigh["ipv6ll"][0] in r["result"]["responders"]
                 else:
                     # 内核不支持 IPv6 时只返回错误，不影响助手继续工作
                     assert not r["ok"]
@@ -187,3 +186,26 @@ def test_restore_network_cleans_up_after_crash(tmp_path, monkeypatch):
         assert "192.168.77.1" not in a_addresses(link.a_if)
         assert stale_network_config() == []
         assert not wf.helper.running
+
+
+def test_bounce_link_makes_b_see_cable_replug():
+    """电子拔插：B 端能看到网线断开再接上，A 的直连配置保持不变，也不误报断线。"""
+    with DirectLink() as link:
+        h = HelperProc()
+        try:
+            assert h.call("link_up", iface=link.a_if, cidr="192.168.77.1/24")["ok"]
+            before = int(link.b("cat", "/sys/class/net/%s/carrier_changes" % link.b_if))
+            t0 = time.time()
+            r = h.call("bounce_link", iface=link.a_if, mode="quick", timeout=60)
+            assert r["ok"], r
+            # veth 不支持重新协商，退回到关闭网口 2 秒
+            assert "关闭网口" in r["result"]["method"]
+            assert time.time() - t0 < 15
+            after = int(link.b("cat", "/sys/class/net/%s/carrier_changes" % link.b_if))
+            assert after - before >= 2, (before, after)
+            assert link.b("cat", "/sys/class/net/%s/carrier" % link.b_if).strip() == "1"
+            assert "192.168.77.1" in a_addresses(link.a_if)
+            time.sleep(2)
+            assert not [e for e in h.events if e["event"] == "carrier"], h.events
+        finally:
+            h.close()

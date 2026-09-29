@@ -22,7 +22,6 @@
 """
 
 import argparse
-import errno
 import ipaddress
 import json
 import os

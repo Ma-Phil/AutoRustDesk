@@ -126,6 +126,8 @@ class Discovery:
         self.lock = threading.Lock()
         self.candidates: Dict[str, Candidate] = {}
         self.foreign_dhcp = False
+        # 有新事件时置位，发现循环据此立即处理
+        self.changed = threading.Event()
 
     def reset(self) -> None:
         with self.lock:
@@ -140,6 +142,10 @@ class Discovery:
 
     def on_event(self, ev: Dict) -> None:
         kind = ev.get("event")
+        self._handle(kind, ev)
+        self.changed.set()
+
+    def _handle(self, kind, ev: Dict) -> None:
         with self.lock:
             if kind == "lease":
                 c = self._cand(ev["mac"])
@@ -426,8 +432,8 @@ class Workflow:
         res = self.helper.call("link_up", iface=iface, cidr=str(a_cidr), timeout=90)
         self.iface, self.net, self.a_ip = iface, net, str(a_cidr.ip)
         self.helper.call("sniff_start", iface=iface)
-        self.ui.log("观察链路 3 秒，确认是直连而不是局域网……")
-        self._sleep(3)
+        self.ui.log("观察链路 2 秒，确认是直连而不是局域网……")
+        self._sleep(2)
         others = [c for c in self.discovery.snapshot()]
         if self.discovery.foreign_dhcp or len(others) > 2:
             text = ("这个网口上发现了%s，看起来连着的是一个局域网而不是直连的电脑 B。\n"
@@ -450,40 +456,42 @@ class Workflow:
     def step_discover(self):
         s = self.settings
         start = time.time()
-        last_probe = 0.0
-        hints = {
-            25: "还没发现电脑 B。请确认 B 已开机、网线两头都插好（网口指示灯应该亮）。",
-            60: "如果 B 的网口设置为自动获取 IP（DHCP），可以把网线拔下再插上，让 B 重新获取地址。",
-            120: "如果仍然找不到，B 的网口可能被禁用，需要在 B 上检查网络设置。",
-        }
-        warned_ssh = False
-        last_scan = 0.0
+        next_probe = next_scan = 0.0
         deep_scanned = False
+        bounces: List[str] = []
+        warned_ssh = False
+        hints = {
+            40: "还没发现电脑 B。请确认 B 已开机、网线两头都插好（网口指示灯应该亮）。",
+            90: "如果仍然找不到，可以手动把网线拔下再插上；B 的网口也可能被禁用，需要在 B 上检查网络设置。",
+        }
         while True:
             self._check_cancel()
-            elapsed = time.time() - start
-            for t in list(hints):
+            now = time.time()
+            elapsed = now - start
+            for t in sorted(hints):
                 if elapsed >= t:
                     self.ui.log(hints.pop(t), "warning")
-            if self.ipv6_ok and time.time() - last_probe > 4:
-                last_probe = time.time()
+            # IPv6 全节点 ping：发出即返回，回应由链路监听收到
+            if self.ipv6_ok and now >= next_probe:
+                next_probe = now + 3
                 try:
                     self.helper.call("probe6", iface=self.iface, timeout=10)
                 except HelperError as e:
                     self.ipv6_ok = False
                     self.ui.log("IPv6 探测不可用（%s），改用其它方式发现设备" % e, "debug")
-            # B 已有地址又不发报文时，被动监听听不到；定期对直连网段做 ARP 扫描
-            if time.time() - last_scan > 10:
-                last_scan = time.time()
+            # 直连网段 ARP 扫描（254 个地址约 0.1 秒）：B 已有地址但不发报文时靠它发现
+            if now >= next_scan:
+                next_scan = now + (3 if elapsed < 30 else 10)
                 try:
                     self.helper.call("arp_scan", iface=self.iface, targets=[str(self.net)], timeout=30)
                 except HelperError as e:
                     self.ui.log("ARP 扫描失败：%s" % e, "debug")
-            if not deep_scanned and elapsed > 15 and not self.discovery.snapshot():
+            # 常见网段 ARP 探测：B 是固定 IP、不发报文、又没开 IPv6 时的办法
+            if not deep_scanned and elapsed > 3 and not self.discovery.snapshot():
                 deep_scanned = True
                 self.ui.log("在常见网段中查找固定 IP 的电脑 B……")
                 try:
-                    self.helper.call("arp_scan", iface=self.iface, common=True, timeout=60)
+                    self.helper.call("arp_scan", iface=self.iface, common=True, pps=4000, timeout=60)
                 except HelperError as e:
                     self.ui.log("ARP 扫描失败：%s" % e, "debug")
             cands = [c for c in self.discovery.snapshot() if not c.dhcp_server]
@@ -498,14 +506,38 @@ class Workflow:
                                                hostname=cand.hostname or (self.registry.get_or_create(cand.mac).hostname))
                     self.ui.device(self._device_info(hostname=cand.hostname))
                     known = "（已知设备：%s）" % dev.title if dev.configured_at else "（新设备）"
-                    return "%s %s" % (cand.describe(), known)
+                    return "%s %s（用时 %.0f 秒）" % (cand.describe(), known, time.time() - start)
                 if not warned_ssh and time.time() - cand.first_seen > 30:
                     warned_ssh = True
                     self.ui.log("已发现设备 %s，但连不上它的 SSH 端口 %d，请确认 B 上开启了 SSH 服务" % (
                         cand.describe(), s.ssh_port), "warning")
-            if elapsed > s.discover_timeout:
+            # 电子"拔插网线"：B 上的 NetworkManager 在 DHCP 连续失败后会停 5 分钟才重试，
+            # 但网线重新接上时会立刻重试。B 还没有任何地址、也没在请求地址时，就让它看到一次断开再接上。
+            waiting_for_b = not any(self._has_address(c) or c.dhcp_client for c in cands)
+            if self.dhcp_enabled and waiting_for_b:
+                if not bounces and elapsed > 5:
+                    bounces.append("quick")
+                    self._bounce("quick")
+                elif len(bounces) == 1 and elapsed > 25:
+                    bounces.append("long")
+                    self._bounce("long")
+            if time.time() - start > s.discover_timeout:
                 raise WorkflowError("%d 秒内没有发现电脑 B（或连不上它的 SSH）" % s.discover_timeout)
-            self._sleep(1)
+            # 有新的发现立即处理，否则最多等 0.3 秒
+            self.discovery.changed.wait(0.3)
+            self.discovery.changed.clear()
+
+    def _has_address(self, c: Candidate) -> bool:
+        return bool(c.lease_ip or c.ipv4 or c.ipv6ll)
+
+    def _bounce(self, mode: str) -> None:
+        self.ui.log("B 还没有来要 IP 地址（它的 DHCP 可能在等待重试），"
+                    "让网口断开再接上一次，相当于自动拔插网线……")
+        try:
+            r = self.helper.call("bounce_link", iface=self.iface, mode=mode, timeout=60)
+            self.ui.log("已%s，等待 B 重新获取地址" % r.get("method", "重新接通网口"), "debug")
+        except HelperError as e:
+            self.ui.log("自动拔插网口失败：%s（可以手动把网线拔下再插上）" % e, "warning")
 
     def _pick_candidate(self, cands: List[Candidate]) -> Optional[Candidate]:
         if not cands:
@@ -532,12 +564,13 @@ class Workflow:
 
     def _reachable_host(self, c: Candidate) -> str:
         port = self.settings.ssh_port
+        # 直连链路往返不到 1 毫秒，1 秒超时足够
         direct = self._in_subnet_ip(c)
-        if direct and tcp_open(direct, port, 2):
+        if direct and tcp_open(direct, port, 1):
             return direct
         for ll in sorted(c.ipv6ll):
             host = "%s%%%s" % (ll, self.iface)
-            if tcp_open(host, port, 2):
+            if tcp_open(host, port, 1):
                 return host
         static = sorted(ip for ip in c.ipv4 if self.net is None or ipaddress.ip_address(ip) not in self.net)
         if static and (not self.ipv6_ok or not c.ipv6ll or time.time() - c.first_seen > 6):
@@ -549,7 +582,7 @@ class Workflow:
                 except HelperError as e:
                     self.ui.log("添加临时地址失败：%s" % e, "warning")
                     continue
-                if tcp_open(ip, port, 2):
+                if tcp_open(ip, port, 1):
                     return ip
         return ""
 

@@ -5,18 +5,19 @@ Linux 网卡默认都有 fe80:: 链路本地地址，并且会回应组播 ping�
 """
 
 import os
-import select
 import socket
 import struct
 import time
-from typing import List, Set
 
 ICMP6_ECHO_REQUEST = 128
-ICMP6_ECHO_REPLY = 129
 
 
-def probe_all_nodes(iface: str, timeout: float = 2.0, own: Set[str] = frozenset()) -> List[str]:
-    """返回回应了的链路本地地址（不含 %网卡 后缀，不含本机地址）。"""
+def probe_all_nodes(iface: str, count: int = 2) -> int:
+    """向 ff02::1 发 ICMPv6 回显请求，不等回应。
+
+    回应由链路监听（sniffer）收到并上报为 neighbor 事件，所以这里发完就返回，
+    不会阻塞发现流程。返回发出的报文数。
+    """
     ifindex = socket.if_nametoindex(iface)
     s = socket.socket(socket.AF_INET6, socket.SOCK_RAW, socket.IPPROTO_ICMPV6)
     try:
@@ -24,27 +25,11 @@ def probe_all_nodes(iface: str, timeout: float = 2.0, own: Set[str] = frozenset(
         s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_HOPS, 1)
         s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_LOOP, 0)
         ident = os.getpid() & 0xFFFF
-        found: List[str] = []
-        for seq in (1, 2):
+        for seq in range(1, count + 1):
             # 校验和由内核填写（ICMPv6 原始套接字总是开启 IPV6_CHECKSUM）
             pkt = struct.pack("!BBHHH", ICMP6_ECHO_REQUEST, 0, 0, ident, seq) + b"AutoRustDesk"
             s.sendto(pkt, ("ff02::1", 0, 0, ifindex))
-            deadline = time.time() + timeout / 2
-            while True:
-                left = deadline - time.time()
-                if left <= 0:
-                    break
-                r, _, _ = select.select([s], [], [], left)
-                if not r:
-                    break
-                data, addr = s.recvfrom(1500)
-                if len(data) < 8 or data[0] != ICMP6_ECHO_REPLY:
-                    continue
-                if struct.unpack("!H", data[4:6])[0] != ident:
-                    continue
-                ip = addr[0].split("%", 1)[0]
-                if ip not in own and ip not in found:
-                    found.append(ip)
-        return found
+            time.sleep(0.05)
+        return count
     finally:
         s.close()

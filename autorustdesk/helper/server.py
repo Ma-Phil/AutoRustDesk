@@ -15,7 +15,7 @@ import signal
 import sys
 import threading
 import traceback
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Set
 
 from .. import __version__
 from . import HELPER_PROTOCOL
@@ -50,6 +50,8 @@ class Helper:
         self._shutdown = threading.Event()
         self._stop_watch = threading.Event()
         self._watcher: Optional[threading.Thread] = None
+        # 正在做"电子拔插"的网卡：期间的断线/接上是我们自己造成的，不上报
+        self._bouncing: Set[str] = set()
 
     # ------------------------------------------------------------------ 输出
 
@@ -107,6 +109,8 @@ class Helper:
         last: Dict[str, str] = {}
         while not self._stop_watch.wait(1.0):
             for iface, link in list(self.links.items()):
+                if iface in self._bouncing:
+                    continue
                 carrier = read_sys(iface, "carrier")
                 prev = last.get(iface)
                 last[iface] = carrier
@@ -174,10 +178,21 @@ class Helper:
         return {"sent": sent}
 
     def cmd_probe6(self, req: Dict) -> Dict:
+        """发出 IPv6 全节点 ping 就返回；回应由链路监听上报为 neighbor 事件。"""
         iface = self._iface(req)
-        own = set(iface_addresses(iface)["ipv6ll"])
-        found = probe_all_nodes(iface, float(req.get("timeout", 2.0)), own)
-        return {"responders": found}
+        return {"sent": probe_all_nodes(iface)}
+
+    def cmd_bounce_link(self, req: Dict) -> Dict:
+        iface = self._iface(req)
+        link = self.links.get(iface)
+        if not link:
+            raise HelperError("请先配置直连网卡")
+        self._bouncing.add(iface)
+        try:
+            how = link.bounce(req.get("mode", "quick"))
+        finally:
+            self._bouncing.discard(iface)
+        return {"method": how}
 
     def cmd_dhcp_start(self, req: Dict) -> Dict:
         iface = self._iface(req)
@@ -258,7 +273,7 @@ class Helper:
                     self.log("收到无法解析的请求：%r" % line[:200], "error")
                     continue
                 # 耗时命令放到线程里，保证事件和其它命令不被阻塞
-                if req.get("cmd") in ("probe6", "arp_scan", "link_up", "cleanup"):
+                if req.get("cmd") in ("probe6", "arp_scan", "bounce_link", "link_up", "cleanup"):
                     threading.Thread(target=self.dispatch, args=(req,), daemon=True).start()
                 else:
                     self.dispatch(req)

@@ -1,0 +1,17 @@
+#!/bin/bash
+# 模拟 Ubuntu 桌面上 NetworkManager 的 DHCP 行为（用于端到端测试）：
+# 网线接上时请求一次地址，失败后不再重试（相当于 NetworkManager 连续失败后
+# 停 5 分钟），只有网线重新接上时才会再请求。
+IF="$1"
+LOG=/var/log/fake-nm.log
+prev=""
+while true; do
+    c=$(cat "/sys/class/net/$IF/carrier" 2>/dev/null || echo 0)
+    if [ "$c" = "1" ] && [ "$prev" != "1" ]; then
+        echo "$(date +%T) 网线接上，请求地址" >> "$LOG"
+        dhclient -1 -v -cf /etc/dhcp/fake-nm.conf -pf "/run/fake-nm-$IF.pid" \
+            -lf "/var/lib/dhcp/fake-nm-$IF.leases" "$IF" >> "$LOG" 2>&1 &
+    fi
+    prev="$c"
+    sleep 0.2
+done

@@ -9,11 +9,16 @@
 所做的修改记录在 /run/autorustdesk/links.json，助手异常退出后可以 cleanup。
 """
 
+import array
+import fcntl
 import ipaddress
 import json
 import os
 import shutil
+import socket
+import struct
 import subprocess
+import time
 from typing import Callable, Dict, List, Optional, Tuple
 
 STATE_DIR = "/run/autorustdesk"
@@ -96,6 +101,34 @@ def all_ipv4_networks(exclude_iface: Optional[str] = None) -> List[Tuple[str, st
                 net = ipaddress.ip_interface("%s/%s" % (a["local"], a["prefixlen"])).network
                 result.append((name, str(net)))
     return result
+
+
+SIOCETHTOOL = 0x8946
+ETHTOOL_NWAY_RST = 0x00000009
+
+
+def ethtool_nway_reset(iface: str) -> bool:
+    """让网卡重新协商链路（等同 ethtool -r），对端会看到网线断开 2~3 秒。不支持时返回 False。"""
+    buf = array.array("I", [ETHTOOL_NWAY_RST, 0])
+    addr, _ = buf.buffer_info()
+    ifr = struct.pack("16sP", iface.encode()[:15], addr).ljust(40, b"\0")
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        fcntl.ioctl(s.fileno(), SIOCETHTOOL, ifr)
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
+def wait_carrier(iface: str, up: bool, timeout: float) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if (read_sys(iface, "carrier") == "1") == up:
+            return True
+        time.sleep(0.2)
+    return False
 
 
 def nm_running() -> bool:
@@ -272,6 +305,27 @@ class LinkConfigurator:
             if cidr not in present:
                 run(["ip", "addr", "add", cidr, "dev", self.iface])
         return True
+
+    def bounce(self, mode: str = "quick") -> str:
+        """电子"拔插网线"：让 B 看到网线断开再接上，促使它立刻重新获取地址。
+
+        B 上的 NetworkManager 在 DHCP 连续失败后会停 5 分钟才重试，但网线重新接上时会
+        立即重试。quick：重新协商链路（断开 2~3 秒，不影响本机 NetworkManager 的连接）；
+        long：关闭网口 7 秒，超过 NetworkManager 6 秒的宽限期，B 正在进行的 DHCP 也会重来。
+        返回实际采用的方式。
+        """
+        if mode == "quick" and ethtool_nway_reset(self.iface):
+            how = "重新协商链路"
+            wait_carrier(self.iface, False, 3)
+        else:
+            seconds = 7 if mode == "long" else 2
+            run(["ip", "link", "set", self.iface, "down"])
+            time.sleep(seconds)
+            run(["ip", "link", "set", self.iface, "up"])
+            how = "关闭网口 %d 秒" % seconds
+        wait_carrier(self.iface, True, 15)
+        self.ensure()
+        return how
 
     def del_address(self, cidr: str) -> None:
         run(["ip", "addr", "del", cidr, "dev", self.iface])

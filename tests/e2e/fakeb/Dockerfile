@@ -10,6 +10,7 @@ RUN useradd -m -s /bin/bash robot && echo 'robot:robot123' | chpasswd && adduser
     && echo /usr/sbin/gdm3 > /etc/X11/default-display-manager \
     && touch /etc/systemd/system/display-manager.service
 COPY gdm-custom.conf /etc/gdm3/custom.conf
-COPY systemctl loginctl /usr/local/bin/
-RUN chmod 755 /usr/local/bin/systemctl /usr/local/bin/loginctl
+COPY systemctl loginctl fake-nm-dhcp /usr/local/bin/
+COPY fake-nm.conf /etc/dhcp/fake-nm.conf
+RUN chmod 755 /usr/local/bin/systemctl /usr/local/bin/loginctl /usr/local/bin/fake-nm-dhcp
 CMD ["/usr/sbin/sshd", "-D", "-e"]
