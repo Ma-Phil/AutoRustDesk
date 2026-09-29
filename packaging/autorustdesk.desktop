@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=AutoRustDesk
+Name[zh_CN]=AutoRustDesk 网线直连远控
+Comment=Direct-cable RustDesk deployment and remote control
+Comment[zh_CN]=网线直连电脑 B，离线部署 RustDesk 并远程控制
+Exec=@EXEC@
+Icon=network-wired
+Terminal=false
+Categories=Network;RemoteAccess;

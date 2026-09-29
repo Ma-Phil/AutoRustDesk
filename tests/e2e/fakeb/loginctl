@@ -1,0 +1,11 @@
+#!/bin/bash
+# loginctl 桩：登录界面重启过（/run/fake-greeter 存在）就报告一个 X11 greeter 会话。
+case "$1" in
+    list-sessions)
+        [ -e /run/fake-greeter ] && echo "     c1  125 gdm  seat0" ;;
+    show-session)
+        if [ "$2" = c1 ]; then
+            printf 'Name=gdm\nType=x11\nClass=greeter\nState=active\nActive=yes\nSeat=seat0\nDisplay=:0\nRemote=no\n'
+        fi ;;
+esac
+exit 0

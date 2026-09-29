@@ -1,0 +1,62 @@
+#!/bin/bash
+# systemctl 桩：只实现 AutoRustDesk 用到的部分，状态记在 /var/lib/fake-systemd。
+S=/var/lib/fake-systemd
+mkdir -p $S/enabled $S/masked
+echo "$(date +%T) systemctl $*" >> $S/calls.log
+
+unit() { local u="$1"; echo "${u%.service}"; }
+
+rustdesk_running() {
+    [ -f /var/lib/fake-rustdesk/service.pid ] && kill -0 "$(cat /var/lib/fake-rustdesk/service.pid)" 2>/dev/null
+}
+
+start_rustdesk() {
+    rustdesk_running && return 0
+    [ -x /usr/bin/rustdesk ] || { echo "Unit rustdesk.service not found."; return 5; }
+    setsid nohup /usr/bin/rustdesk --service > /var/log/fake-rustdesk.log 2>&1 < /dev/null &
+    for _ in $(seq 1 20); do rustdesk_running && return 0; sleep 0.1; done
+}
+
+stop_rustdesk() {
+    rustdesk_running && kill "$(cat /var/lib/fake-rustdesk/service.pid)"
+    rm -f /var/lib/fake-rustdesk/service.pid
+}
+
+cmd="$1"; shift
+case "$cmd" in
+    is-active)
+        u=$(unit "$1")
+        case "$u" in
+            rustdesk) if rustdesk_running; then echo active; exit 0; else echo inactive; exit 3; fi ;;
+            display-manager) echo active; exit 0 ;;
+            *) echo inactive; exit 3 ;;
+        esac ;;
+    is-enabled)
+        u=$(unit "$1")
+        if [ -e "$S/masked/$u" ]; then echo masked; exit 1; fi
+        if [ -e "$S/enabled/$u" ]; then echo enabled; exit 0; fi
+        echo disabled; exit 1 ;;
+    enable)
+        for u in "$@"; do [ "$u" = "--now" ] && continue; touch "$S/enabled/$(unit "$u")"; done ;;
+    disable)
+        for u in "$@"; do rm -f "$S/enabled/$(unit "$u")"; done ;;
+    mask)
+        for u in "$@"; do touch "$S/masked/$(unit "$u")"; done ;;
+    unmask)
+        for u in "$@"; do rm -f "$S/masked/$(unit "$u")"; done ;;
+    start|restart|stop)
+        for u in "$@"; do
+            case "$(unit "$u")" in
+                rustdesk)
+                    [ "$cmd" != start ] && stop_rustdesk
+                    [ "$cmd" != stop ] && start_rustdesk ;;
+                display-manager|gdm3)
+                    # 重启登录界面后出现一个 X11 的 greeter 会话
+                    touch /run/fake-greeter ;;
+            esac
+        done ;;
+    daemon-reload) ;;
+    get-default) echo graphical.target ;;
+    *) ;;
+esac
+exit 0
