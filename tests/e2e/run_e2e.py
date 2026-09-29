@@ -20,6 +20,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 IMAGE = "ard-fakeb:focal"
+UBUNTU = {"20.04": "focal", "22.04": "jammy", "24.04": "noble", "26.04": "resolute"}
 CONTAINER = "ard-fakeb-e2e"
 A_IF, B_IF = "ardA1", "ardB1"
 SCENARIOS = ["dhcp", "idle", "static", "silent"]
@@ -167,11 +168,15 @@ def swap_scenario(bundle, home):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--bundle", required=True)
+    ap.add_argument("--ubuntu", choices=sorted(UBUNTU), default="20.04", help="假电脑 B 的 Ubuntu 版本")
     ap.add_argument("--scenario", choices=SCENARIOS + ["swap", "all"], default="all")
     args = ap.parse_args()
     bundle = os.path.abspath(args.bundle)
-    print("构建假电脑 B 的镜像……", flush=True)
-    sh("docker", "build", "-q", "-t", IMAGE, os.path.join(HERE, "fakeb"), timeout=1800)
+    global IMAGE
+    IMAGE = "ard-fakeb:%s" % UBUNTU[args.ubuntu]
+    print("构建假电脑 B 的镜像（Ubuntu %s）……" % args.ubuntu, flush=True)
+    sh("docker", "build", "-q", "--build-arg", "BASE=ubuntu:%s" % args.ubuntu, "-t", IMAGE,
+       os.path.join(HERE, "fakeb"), timeout=1800)
     scenarios = SCENARIOS + ["swap"] if args.scenario == "all" else [args.scenario]
     for scenario in scenarios:
         if scenario == "swap":

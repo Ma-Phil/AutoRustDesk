@@ -103,16 +103,17 @@ class BundleBuildRunner(QThread):
     progress_signal = Signal(str, float)
     finished_with = Signal(object)
 
-    def __init__(self, deb: str, output: str, mirror: str):
+    def __init__(self, deb: str, output: str, mirror: str, releases: List[str]):
         super().__init__()
         self.deb = deb
         self.output = output
         self.mirror = mirror
+        self.releases = releases
 
     def run(self) -> None:
         try:
             path = build_bundle(
-                self.deb, self.output, mirror=self.mirror,
+                self.deb, self.output, releases=self.releases, mirror=self.mirror,
                 log=self.log_signal.emit,
                 progress=lambda stage, frac: self.progress_signal.emit(stage, frac),
             )

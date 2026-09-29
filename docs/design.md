@@ -82,22 +82,65 @@ RustDesk 的 IP 直连使用 IPv4。B 的直连网口没有直连网段地址时
 
 ## 3. 离线部署包（`bundle/`）
 
-- 格式：一个 tar 文件，包含 `autorustdesk-bundle/manifest.json` 和 `repo/`（扁平 apt 源：`*.deb`、`Packages`、`Packages.gz`、`Release`）。
-- 制作：纯 Python 实现，不依赖 apt 或 Docker，Windows、macOS、Linux 上都能运行。流程如下：
-  1. 读取 RustDesk deb 的 control（ar + tar，支持 gz、xz、zst）；
-  2. 下载 `focal`、`focal-updates`、`focal-security` 的 `Packages.xz`，按 InRelease 里的 SHA256 校验；有 gpgv 时还校验签名；
-  3. 从 `Depends`、`Pre-Depends` 出发计算**完整依赖闭包**：
-     - 支持备选依赖（`a | b`）、版本约束、虚拟包（Provides）；
-     - 有多个提供者时，优先选 Priority 高的；
-     - 版本比较算法与 dpkg 一致；
-  4. 下载每个 deb 并校验 SHA256，同时带上 `xserver-xorg-video-dummy`。
-- 为什么带完整闭包（连 libc6 都带）：B 上 apt 只安装缺少的包、必要时升级，多带的包不会被装上。这样即使 B 是最早的 20.04.0，没有更新过，也能装得上。
-- B 端安装（`ard_remote.py install`）：
-  - 用单独的 `sources.list`、`lists` 目录指向本地源，不碰 B 原有的 apt 配置；
-  - `apt-get install --no-install-recommends --no-remove`，绝不删除 B 上的包；
-  - 处理 dpkg 被中断、依赖损坏等情况。
+### 3.1 支持的 B 系统
+
+| Ubuntu | 代号 | 支持程度 | 说明 |
+|---|---|---|---|
+| 20.04 | focal | 完整 | 最初的目标系统 |
+| 22.04 | jammy | 完整 | `ubuntu-session` 仍提供 `xsessions/ubuntu-xorg.desktop` |
+| 24.04 | noble | 完整 | 同上；依赖用 t64 包名，RustDesk 的备选依赖已覆盖 |
+| 26.04 | resolute | 部分 | `ubuntu-session` 只剩 Wayland 会话（已在软件源的 Contents 中确认），见 4.1 |
+
+### 3.2 格式
+
+离线包是一个 tar 文件（格式 2），一个包里可以含多个 Ubuntu 版本：
+
+```
+autorustdesk-bundle/
+    manifest.json        RustDesk 信息、install_packages、releases{代号: 版本号 + 包清单}
+    pool/*.deb           RustDesk 本身和各版本的依赖，同名文件只存一份（Ubuntu 的 pool 文件名含版本号）
+    repos/<代号>/        各版本本地 apt 源的索引：Packages、Packages.gz、Release
+```
+
+连接时，A 从离线包里取出 B 那个版本的**单版本包**（格式 1：`manifest.json` + `repo/`，其中 `Packages` 和对应的 `.deb` 放在一起），只上传这部分。B 端脚本只认识格式 1。第一版做的只含 20.04 的格式 1 离线包仍可直接使用。
+
+### 3.3 制作
+
+纯 Python 实现，不依赖 apt 或 Docker，Windows、macOS、Linux 上都能运行。对每个选中的版本分别执行：
+
+1. 读取 RustDesk deb 的 control（ar + tar，支持 gz、xz、zst）；
+2. 下载 `<代号>`、`<代号>-updates`、`<代号>-security` 的 `Packages.xz`，按 InRelease 里的 SHA256 校验；有 gpgv 时还校验签名；
+3. 从 `Depends`、`Pre-Depends` 出发计算**完整依赖闭包**：
+   - 支持备选依赖（`a | b`）、版本约束、虚拟包（Provides）；
+   - 有多个提供者时，优先选 Priority 高的；
+   - 版本比较算法与 dpkg 一致；
+4. 下载每个 deb 并校验 SHA256，同时带上 `xserver-xorg-video-dummy`。
+
+为什么带完整闭包（连 libc6 都带）：B 上 apt 只安装缺少的包、必要时升级，多带的包不会被装上。这样即使 B 是某个版本最早的发行版，一直没有更新过，也能装得上。
+
+### 3.4 B 端安装（`ard_remote.py install`）
+
+- 离线包的目标版本必须与 B 的版本代号一致，否则直接报错，提示重新制作。混用不同版本的依赖可能把系统库装乱。
+- 用单独的 `sources.list`、`lists` 目录指向本地源，不碰 B 原有的 apt 配置。
+- `apt-get install --no-install-recommends --no-remove`，绝不删除 B 上的包。
+- 处理 dpkg 被中断、依赖损坏等情况。
 
 ## 4. B 端配置（`ard_remote.py configure`）
+
+### 4.1 只有 Wayland 的系统（Ubuntu 26.04 起）
+
+判断方法：版本代号在已知的"只有 Wayland"名单里，或者 `/usr/share/xsessions/` 下没有任何 Xorg 会话。满足任一条件时：
+
+- 不修改 GDM 的 `WaylandEnable`（改了会导致无法登录）；
+- 不启用虚拟显示器（它是给 Xorg 用的）；
+- 不重启登录界面；
+- 其余 RustDesk 设置照常进行。
+
+没有图形会话时，RustDesk 的 IPC 不可用，固定密码设不上。这时会明确提示"先在 B 上接显示器并登录桌面"。A 端在检查环境这一步就会说明这些限制，并询问是否继续。
+
+新版 RustDesk 源码里有一个 `rustdesk-unattended-wayland` 变体（通过 DRM 直接截屏），将来可能用来支持 26.04 的无人值守，目前没有验证。
+
+### 4.2 配置步骤（能使用 Xorg 的系统）
 
 1. **登录界面**：`/etc/gdm3/custom.conf` 的 `[daemon]` 中设置 `WaylandEnable=false`，并删除所有被注释的 `WaylandEnable` 行。RustDesk 源码里的 `is_login_wayland()` 用正则 `# *WaylandEnable *= *false` 判断，只要注释行还在，它就认为登录界面是 Wayland。
 2. **虚拟显示器**：新版 RustDesk 已移除 `allow-linux-headless`，改由我们自己配置：
@@ -147,7 +190,7 @@ RustDesk 的 IP 直连使用 IPv4。B 的直连网口没有直连网段地址时
   - 外来 DHCP 服务器的防误伤；
   - 电子拔插（B 端能看到断开再接上，A 的配置保持不变）；
   - 异常退出后的清理。
-- **端到端测试**（`tests/e2e`）：A 与一个 Ubuntu 20.04 容器（`--network none`，SSH + sudo + dhclient + systemd 桩）之间用 veth 相连，完整跑通离线安装和配置，覆盖以下场景：
+- **端到端测试**（`tests/e2e`）：A 与一个 Ubuntu 容器（20.04 / 22.04 / 24.04，`--network none`，SSH + sudo + dhclient + systemd 桩）之间用 veth 相连，用同一个多版本离线包完整跑通离线安装和配置，覆盖以下场景：
   - DHCP、DHCP 已放弃重试（模拟 NetworkManager，只在网线接上时请求地址，验证电子拔插）、固定 IP、静默固定 IP 四种网络情况；
   - 程序不退出时拔线换插另一台设备；
   - 快速连接；

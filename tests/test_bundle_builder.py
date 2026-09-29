@@ -8,7 +8,7 @@ import threading
 
 import pytest
 
-from autorustdesk.bundle import Bundle
+from autorustdesk.bundle import Bundle, BundleError, parse_releases
 from autorustdesk.bundle.builder import (
     PackageIndex,
     build_bundle,
@@ -160,36 +160,45 @@ class _Quiet(http.server.SimpleHTTPRequestHandler):
         pass
 
 
-@pytest.fixture()
-def fake_mirror(tmp_path):
-    """在本地 HTTP 服务上搭一个假的 Ubuntu 软件源。"""
-    root = tmp_path / "mirror"
+# 22.04 的索引：GTK 版本不同，其余包（例如图标主题）与 20.04 同名同内容
+INDEX_JAMMY = INDEX.replace("3.24.20-0ubuntu1", "3.24.33-1ubuntu2")
+
+
+def _publish(root, codename, index_text):
     stanzas = []
-    for st in iter_stanzas(INDEX):
+    for st in iter_stanzas(index_text):
         if st.get("Architecture") == "i386":
             continue
         deb_path = root / st["Filename"]
-        build_deb(
-            str(deb_path),
-            "Package: %s\nVersion: %s\nArchitecture: %s\nDescription: x\n"
-            % (st["Package"], st["Version"], st["Architecture"]),
-            {"usr/share/doc/%s/x" % st["Package"]: (b"x", 0o644)},
-            {},
-        )
+        if not deb_path.exists():
+            build_deb(
+                str(deb_path),
+                "Package: %s\nVersion: %s\nArchitecture: %s\nDescription: x\n"
+                % (st["Package"], st["Version"], st["Architecture"]),
+                {"usr/share/doc/%s/x" % st["Package"]: (b"x", 0o644)},
+                {},
+            )
         data = deb_path.read_bytes()
         stanzas.append(
             st.raw + "\nSize: %d\nSHA256: %s" % (len(data), hashlib.sha256(data).hexdigest())
         )
     packages_xz = lzma.compress(("\n\n".join(stanzas) + "\n").encode())
     rel = "main/binary-amd64/Packages.xz"
-    dist = root / "dists" / "focal"
+    dist = root / "dists" / codename
     (dist / "main" / "binary-amd64").mkdir(parents=True)
     (dist / rel).write_bytes(packages_xz)
     (dist / "InRelease").write_text(
-        "Origin: Ubuntu\nSuite: focal\nSHA256:\n %s %d %s\n"
-        % (hashlib.sha256(packages_xz).hexdigest(), len(packages_xz), rel)
+        "Origin: Ubuntu\nSuite: %s\nSHA256:\n %s %d %s\n"
+        % (codename, hashlib.sha256(packages_xz).hexdigest(), len(packages_xz), rel)
     )
 
+
+@pytest.fixture()
+def fake_mirror(tmp_path):
+    """在本地 HTTP 服务上搭一个假的 Ubuntu 软件源（含 focal 和 jammy）。"""
+    root = tmp_path / "mirror"
+    _publish(root, "focal", INDEX)
+    _publish(root, "jammy", INDEX_JAMMY)
     handler = lambda *a, **kw: _Quiet(*a, directory=str(root), **kw)  # noqa: E731
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
     t = threading.Thread(target=server.serve_forever, daemon=True)
@@ -198,35 +207,116 @@ def fake_mirror(tmp_path):
     server.shutdown()
 
 
-def test_build_bundle_end_to_end(tmp_path, fake_mirror):
+def _indices(mirror, cache, releases):
+    return {r: load_index(mirror, cache, suites=[r], components=["main"], verify_gpg="no")
+            for r in releases}
+
+
+def _repo_packages(tar_path, member):
+    with tarfile.open(tar_path) as tf:
+        return tf.extractfile(member).read().decode()
+
+
+def test_build_bundle_single_release(tmp_path, fake_mirror):
     deb = build_deb(str(tmp_path / "rustdesk-1.4.2-x86_64.deb"), RUSTDESK_CONTROL, {}, {})
     cache = str(tmp_path / "cache")
-    index = load_index(fake_mirror, cache, suites=["focal"], components=["main"], verify_gpg="no")
-    out = build_bundle(
-        deb,
-        str(tmp_path / "out" / "bundle.tar"),
-        mirror=fake_mirror,
-        cache_dir=cache,
-        index=index,
-    )
+    out = build_bundle(deb, str(tmp_path / "out" / "bundle.tar"), releases=["focal"],
+                       mirror=fake_mirror, cache_dir=cache,
+                       indices=_indices(fake_mirror, cache, ["focal"]))
     b = Bundle.open(out)
+    assert b.format == 2
     assert b.rustdesk_version == "1.4.2"
     assert b.install_packages == ["rustdesk", "xserver-xorg-video-dummy"]
+    assert list(b.releases) == ["focal"]
     with tarfile.open(out) as tf:
         names = tf.getnames()
-        assert "autorustdesk-bundle/repo/Packages" in names
-        assert "autorustdesk-bundle/repo/Release" in names
-        assert "autorustdesk-bundle/repo/rustdesk-1.4.2-x86_64.deb" in names
-        packages = tf.extractfile("autorustdesk-bundle/repo/Packages").read().decode()
+    assert "autorustdesk-bundle/repos/focal/Packages" in names
+    assert "autorustdesk-bundle/repos/focal/Release" in names
+    assert "autorustdesk-bundle/pool/rustdesk-1.4.2-x86_64.deb" in names
+    packages = _repo_packages(out, "autorustdesk-bundle/repos/focal/Packages")
     # 本地源里的 Filename 都指向仓库根目录
     for st in iter_stanzas(packages):
         assert st["Filename"].startswith("./")
         assert "/" not in st["Filename"][2:]
     names_in_repo = {st["Package"] for st in iter_stanzas(packages)}
     assert {"rustdesk", "libgtk-3-0", "curl", "libcurl4", "xserver-xorg-video-dummy"} <= names_in_repo
-    manifest = json.loads(
-        tarfile.open(out).extractfile("autorustdesk-bundle/manifest.json").read().decode()
-    )
-    assert manifest["rustdesk"]["sha256"]
+    assert b.manifest["rustdesk"]["sha256"]
     # 缓存里应该有下载过的包，第二次制作直接复用
     assert os.listdir(os.path.join(cache, "debs"))
+
+
+def test_build_bundle_multi_release_and_extract_per_release(tmp_path, fake_mirror):
+    deb = build_deb(str(tmp_path / "rustdesk-1.4.2-x86_64.deb"), RUSTDESK_CONTROL, {}, {})
+    cache = str(tmp_path / "cache")
+    out = build_bundle(deb, str(tmp_path / "bundle.tar"), releases=["focal", "jammy"],
+                       mirror=fake_mirror, cache_dir=cache,
+                       indices=_indices(fake_mirror, cache, ["focal", "jammy"]))
+    b = Bundle.open(out)
+    assert set(b.releases) == {"focal", "jammy"}
+    assert "20.04" in b.summary() and "22.04" in b.summary()
+    with tarfile.open(out) as tf:
+        pool = [n for n in tf.getnames() if n.startswith("autorustdesk-bundle/pool/")]
+    # 两个版本共用的包只存一份，不同版本的 GTK 各一份
+    assert sum("adwaita-icon-theme" in n for n in pool) == 1
+    assert sum("libgtk-3-0_" in n for n in pool) == 2
+
+    for codename, gtk in (("focal", "3.24.20-0ubuntu1"), ("jammy", "3.24.33-1ubuntu2")):
+        sub = str(tmp_path / ("%s.tar" % codename))
+        b.write_release_tar(codename, sub)
+        with tarfile.open(sub) as tf:
+            names = set(tf.getnames())
+            manifest = json.loads(tf.extractfile("autorustdesk-bundle/manifest.json").read())
+            packages = tf.extractfile("autorustdesk-bundle/repo/Packages").read().decode()
+        # 给 B 的是单版本（格式 1）包：B 端脚本不用区分格式
+        assert manifest["format"] == 1
+        assert manifest["target"]["codename"] == codename
+        assert manifest["rustdesk"]["file"] == "repo/rustdesk-1.4.2-x86_64.deb"
+        stanzas = list(iter_stanzas(packages))
+        assert any(st["Package"] == "libgtk-3-0" and st["Version"] == gtk for st in stanzas)
+        for st in stanzas:
+            assert "autorustdesk-bundle/repo/" + st["Filename"][2:] in names
+        assert not any("/pool/" in n or "/repos/" in n for n in names)
+
+    # 目录形式的离线包也能取出单版本包
+    extracted = tmp_path / "dir"
+    with tarfile.open(out) as tf:
+        tf.extractall(extracted)
+    d = Bundle.open(str(extracted))
+    d.write_release_tar("jammy", str(tmp_path / "jammy2.tar"))
+    assert "libgtk-3-0_3.24.33" in " ".join(tarfile.open(str(tmp_path / "jammy2.tar")).getnames())
+
+    with pytest.raises(BundleError):
+        b.write_release_tar("noble", str(tmp_path / "noble.tar"))
+
+
+def test_old_format1_bundle_still_works(tmp_path):
+    """第一版程序做的离线包（只含 20.04，格式 1）仍能使用。"""
+    root = tmp_path / "old" / "autorustdesk-bundle"
+    (root / "repo").mkdir(parents=True)
+    (root / "repo" / "Packages").write_text("Package: rustdesk\nVersion: 1.4.2\nFilename: ./rd.deb\n")
+    (root / "repo" / "rd.deb").write_bytes(b"deb")
+    (root / "manifest.json").write_text(json.dumps({
+        "format": 1, "rustdesk": {"version": "1.4.2", "file": "repo/rd.deb"},
+        "target": {"distro": "ubuntu", "release": "20.04", "codename": "focal", "arch": "amd64"},
+        "install_packages": ["rustdesk"], "packages": [],
+    }))
+    old_tar = str(tmp_path / "old.tar")
+    with tarfile.open(old_tar, "w") as tf:
+        tf.add(str(root), arcname="autorustdesk-bundle")
+    for path in (old_tar, str(tmp_path / "old")):
+        b = Bundle.open(path)
+        assert list(b.releases) == ["focal"]
+        sub = str(tmp_path / "sub.tar")
+        b.write_release_tar("focal", sub)
+        names = set(tarfile.open(sub).getnames())
+        assert {"autorustdesk-bundle/manifest.json", "autorustdesk-bundle/repo/Packages",
+                "autorustdesk-bundle/repo/rd.deb"} <= names
+        with pytest.raises(BundleError):
+            b.write_release_tar("jammy", sub)
+
+
+def test_parse_releases():
+    assert parse_releases("20.04, 22.04,noble") == ["focal", "jammy", "noble"]
+    assert parse_releases("26.04") == ["resolute"]
+    with pytest.raises(BundleError):
+        parse_releases("18.04")

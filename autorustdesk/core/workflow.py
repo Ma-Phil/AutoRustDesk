@@ -11,13 +11,12 @@ import posixpath
 import shutil
 import socket
 import subprocess
-import tarfile
 import tempfile
 import threading
 import time
 from typing import Dict, List, Optional, Set, Tuple
 
-from ..bundle import Bundle, BundleError
+from ..bundle import RELEASES, Bundle, BundleError, release_label
 from ..debian import version_compare
 from ..helper.linkconfig import PROFILE_PREFIX
 from ..helper.linkconfig import STATE_FILE as STALE_STATE_FILE
@@ -671,8 +670,20 @@ class Workflow:
         rd = f["rustdesk"]
         disp = f["display"]
         state = DONE
-        if f["os"].get("codename") != "focal":
-            self.ui.log("注意：B 是 %s，不是 Ubuntu 20.04" % f["os"].get("pretty"), "warning")
+        codename = f["os"].get("codename", "")
+        pretty = f["os"].get("pretty") or codename or "?"
+        if codename not in RELEASES:
+            self.ui.log("注意：B 是 %s，不在测试过的版本（%s）之内" % (
+                pretty, "、".join(release_label(c) for c in RELEASES)), "warning")
+            state = WARNING
+        if not disp.get("xorg_usable", True):
+            text = ("B 是 %s，只提供 Wayland 桌面（Ubuntu 26.04 起 GNOME 不再提供 Xorg 会话）。\n\n"
+                    "本程序可以安装并配置 RustDesk，但是：\n"
+                    "· RustDesk 无法控制登录界面，B 没接显示器时也无法使用；\n"
+                    "· 需要有人在 B 上登录桌面后才能远程，连接时 B 上可能要确认共享屏幕。\n\n"
+                    "是否继续？") % pretty
+            if not self.ui.confirm("B 只能部分支持", text, default=False):
+                raise Cancelled()
             state = WARNING
         if disp.get("xorg_conf"):
             self.ui.log("注意：B 上有 /etc/X11/xorg.conf，可能导致虚拟显示器不生效", "warning")
@@ -682,7 +693,8 @@ class Workflow:
             f["os"].get("pretty") or "?",
             "RustDesk %s%s" % (rd.get("version") or "未安装",
                                "（服务运行中）" if rd.get("service_active") == "active" else ""),
-            "登录界面 %s" % ("Xorg" if disp.get("gdm_wayland") == "disabled" else "Wayland"),
+            "登录界面 %s" % ("Xorg" if disp.get("gdm_wayland") == "disabled" else
+                            "Wayland" if disp.get("xorg_usable", True) else "Wayland（没有 Xorg）"),
             "显示器 %s" % ("、".join(disp.get("monitors") or []) or "未连接"),
             "已登录用户 %d 个" % disp.get("user_sessions", 0),
         ]
@@ -698,7 +710,9 @@ class Workflow:
         disp = self.facts["display"]
         bundle = self.bundle()
         installed = rd.get("version")
-        need_dummy = self.settings.headless in ("auto", "on") and not disp.get("dummy_driver")
+        # 只有 Wayland 的系统用不上虚拟显示驱动（它是给 Xorg 用的）
+        need_dummy = (self.settings.headless in ("auto", "on") and not disp.get("dummy_driver")
+                      and disp.get("xorg_usable", True))
         need_rd = not installed or bool(
             bundle and version_compare(installed, bundle.rustdesk_version) < 0)
         if not need_rd and not need_dummy:
@@ -714,11 +728,19 @@ class Workflow:
                 need_rd = False
                 if not need_dummy:
                     return SKIPPED, "保留 RustDesk %s" % installed
+        codename = self.facts["os"].get("codename", "")
+        if not bundle.has_release(codename):
+            raise WorkflowError("离线包里没有 %s 的依赖（离线包包含：%s）。请用「制作离线包」重新制作，并勾选 %s" % (
+                release_label(codename), "、".join(release_label(c) for c in bundle.releases),
+                release_label(codename)))
         packages = [p for p in bundle.install_packages
                     if (p == "rustdesk" and need_rd) or (p != "rustdesk" and need_dummy)]
         assert self.session is not None
-        local, tmp = self._bundle_tar(bundle)
+        # 只上传 B 这个版本需要的那部分
+        fd, local = tempfile.mkstemp(suffix=".tar", prefix="ard-bundle-")
+        os.close(fd)
         try:
+            bundle.write_release_tar(codename, local)
             remote = posixpath.join(self.session.workdir, "bundle.tar")
             size = os.path.getsize(local)
             self.ui.log("上传离线包（%.1f MB）……" % (size / 1048576.0))
@@ -734,26 +756,12 @@ class Workflow:
             self.session.put(local, remote, progress)
             self.ui.progress("", -1)
         finally:
-            if tmp:
-                os.remove(local)
+            os.remove(local)
         res = self._ard("install", ["--bundle", remote, "--packages"] + packages, timeout=3600)
         ver = res.get("rustdesk_version") or installed or ""
         self.registry.update(self.mac, rustdesk_version=ver)
         self.facts["rustdesk"]["version"] = ver
         return "RustDesk %s 已安装" % ver
-
-    def _bundle_tar(self, bundle: Bundle) -> Tuple[str, bool]:
-        """离线包是目录时临时打成 tar。返回 (路径, 是否临时文件)。"""
-        if not bundle.is_dir:
-            return bundle.path, False
-        fd, path = tempfile.mkstemp(suffix=".tar", prefix="ard-bundle-")
-        os.close(fd)
-        root = bundle.path
-        if not os.path.isfile(os.path.join(root, "manifest.json")):
-            root = os.path.join(root, "autorustdesk-bundle")
-        with tarfile.open(path, "w") as tf:
-            tf.add(root, arcname="autorustdesk-bundle")
-        return path, True
 
     # ------------------------------------------------------------------ 6 配置
 

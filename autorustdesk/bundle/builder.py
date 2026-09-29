@@ -1,8 +1,9 @@
 """制作离线部署包（需要联网）。
 
-不依赖 apt / Docker：直接读取 Ubuntu 20.04 软件源的 Packages 索引，
-计算 RustDesk 及额外软件包的完整依赖闭包，下载并校验每个 .deb，
-生成扁平的本地软件源和 manifest.json，最后打成一个 tar。
+不依赖 apt / Docker：直接读取所选 Ubuntu 版本（20.04 / 22.04 / 24.04 / 26.04）
+软件源的 Packages 索引，分别计算 RustDesk 及额外软件包的完整依赖闭包，
+下载并校验每个 .deb（各版本共用、同名文件只存一份），为每个版本生成本地
+软件源索引和 manifest.json，最后打成一个 tar。
 
 包含完整闭包（连 libc6 等基础包也带上）是有意为之：B 上 apt 只会
 安装缺少的包、必要时升级，多带的包不会被装上。
@@ -34,7 +35,8 @@ from ..debian import (
     version_compare,
     version_satisfies,
 )
-from . import BUNDLE_FORMAT, BUNDLE_ROOT, EXTRA_PACKAGES, MANIFEST_NAME, TARGET
+from . import (ARCH, BUNDLE_FORMAT, BUNDLE_ROOT, DEFAULT_RELEASES, EXTRA_PACKAGES, MANIFEST_NAME,
+               RELEASES, release_label)
 
 MIRRORS = [
     ("Ubuntu 官方源", "http://archive.ubuntu.com/ubuntu"),
@@ -44,7 +46,12 @@ MIRRORS = [
 ]
 DEFAULT_MIRROR = MIRRORS[0][1]
 
-SUITES = ["focal", "focal-updates", "focal-security"]
+
+
+def suites_for(codename: str) -> List[str]:
+    return [codename, codename + "-updates", codename + "-security"]
+
+
 COMPONENTS = ["main", "restricted", "universe", "multiverse"]
 ARCHES = ("amd64", "all")
 UBUNTU_KEYRING = "/usr/share/keyrings/ubuntu-archive-keyring.gpg"
@@ -191,7 +198,7 @@ class _VersionKey:
 def load_index(
     mirror: str,
     cache_dir: str,
-    suites: Iterable[str] = SUITES,
+    suites: Iterable[str],
     components: Iterable[str] = COMPONENTS,
     log: LogFn = _noop_log,
     verify_gpg: str = "auto",
@@ -207,7 +214,7 @@ def load_index(
         _verify_inrelease(inrelease, suite, log, verify_gpg)
         hashes = parse_release_hashes(inrelease.decode("utf-8", "replace"))
         for comp in components:
-            rel_path = "%s/binary-%s/Packages.xz" % (comp, TARGET["arch"])
+            rel_path = "%s/binary-%s/Packages.xz" % (comp, ARCH)
             if rel_path not in hashes:
                 continue
             want_sha, want_size = hashes[rel_path]
@@ -366,6 +373,13 @@ def _download_debs(
         filename = st["Filename"]
         want_sha = st.get("SHA256", "")
         base = os.path.basename(filename)
+        dest = os.path.join(dest_dir, base)
+        if os.path.isfile(dest):
+            # 另一个 Ubuntu 版本已经放进来了同一个文件
+            if _sha256_file(dest) != want_sha:
+                raise BuildError("不同版本里的同名文件内容不一致：%s" % base)
+            done[0] += int(st.get("Size", "0"))
+            return
         cached = os.path.join(pool_cache, base)
         if not (os.path.isfile(cached) and _sha256_file(cached) == want_sha):
             blob = _http_get("%s/%s" % (mirror, filename), timeout=600)
@@ -374,7 +388,7 @@ def _download_debs(
             with open(cached + ".tmp", "wb") as f:
                 f.write(blob)
             os.replace(cached + ".tmp", cached)
-        shutil.copyfile(cached, os.path.join(dest_dir, base))
+        shutil.copyfile(cached, dest)
         done[0] += int(st.get("Size", "0"))
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
@@ -445,15 +459,20 @@ def deb_stanza_text(deb_path: str, control: Stanza) -> str:
 def build_bundle(
     rustdesk_deb: str,
     output: str,
+    releases: Optional[List[str]] = None,
     mirror: str = DEFAULT_MIRROR,
     extra_packages: Optional[List[str]] = None,
     cache_dir: Optional[str] = None,
     log: LogFn = _noop_log,
     progress: ProgressFn = _noop_progress,
     verify_gpg: str = "auto",
-    index: Optional[PackageIndex] = None,
+    indices: Optional[Dict[str, PackageIndex]] = None,
 ) -> str:
-    """制作离线包，返回输出文件路径。"""
+    """制作离线包，返回输出文件路径。releases 为 Ubuntu 代号列表（默认 20.04/22.04/24.04）。"""
+    releases = list(releases or DEFAULT_RELEASES)
+    for r in releases:
+        if r not in RELEASES:
+            raise BuildError("不支持的 Ubuntu 版本：%s" % r)
     extra_packages = list(EXTRA_PACKAGES if extra_packages is None else extra_packages)
     cache_dir = cache_dir or default_cache_dir()
     if not os.path.isfile(rustdesk_deb):
@@ -465,12 +484,9 @@ def build_bundle(
     log("RustDesk 安装包：%s %s（%s）" % (pkg_name, control.get("Version"), arch))
     if pkg_name != "rustdesk":
         log("警告：包名是 %r 而不是 rustdesk" % pkg_name)
-    if arch not in (TARGET["arch"], "all"):
-        raise BuildError("RustDesk 安装包架构是 %s，电脑 B 需要 %s（x86_64）" % (arch, TARGET["arch"]))
-
-    progress("读取软件源索引", 0.0)
-    if index is None:
-        index = load_index(mirror, cache_dir, log=log, verify_gpg=verify_gpg)
+    if arch not in (ARCH, "all"):
+        raise BuildError("RustDesk 安装包架构是 %s，电脑 B 需要 %s（x86_64）" % (arch, ARCH))
+    log("目标系统：%s" % "、".join(release_label(r) for r in releases))
 
     roots: List[Tuple[List[Relation], str]] = []
     for field in ("Pre-Depends", "Depends"):
@@ -478,58 +494,77 @@ def build_bundle(
             roots.append((group, pkg_name))
     for name in extra_packages:
         roots.append(([Relation(name)], "额外软件包"))
-    progress("计算依赖", 0.1)
-    closure = resolve_closure(index, roots)
-    # 不要把 RustDesk 自己从镜像里再下载一遍（官方源里也没有）
-    closure = [st for st in closure if st.name != pkg_name]
-    total_mb = sum(int(st.get("Size", "0")) for st in closure) / 1048576.0
-    log("依赖闭包：%d 个软件包，约 %.1f MB" % (len(closure), total_mb))
 
     staging = tempfile.mkdtemp(prefix="ard-bundle-")
     try:
         root = os.path.join(staging, BUNDLE_ROOT)
-        repo = os.path.join(root, "repo")
-        os.makedirs(repo)
-        _download_debs(mirror, closure, repo, cache_dir, log, progress)
-
+        pool = os.path.join(root, "pool")
+        os.makedirs(pool)
         deb_name = os.path.basename(rustdesk_deb)
-        shutil.copyfile(rustdesk_deb, os.path.join(repo, deb_name))
-        texts = [_local_stanza_text(st) for st in closure]
-        texts.append(deb_stanza_text(os.path.join(repo, deb_name), control))
-        write_local_repo(repo, texts)
+        shutil.copyfile(rustdesk_deb, os.path.join(pool, deb_name))
+        rustdesk_text = deb_stanza_text(os.path.join(pool, deb_name), control)
+        manifest_releases: Dict[str, Dict] = {}
 
-        packages = []
-        for st in closure:
-            packages.append(
-                {
-                    "name": st.name,
-                    "version": st.version,
-                    "file": "repo/" + os.path.basename(st["Filename"]),
-                    "size": int(st.get("Size", "0")),
-                    "sha256": st.get("SHA256", ""),
-                }
-            )
-        _md5, rd_sha, rd_size = _hashes(os.path.join(repo, deb_name))
+        n = len(releases)
+        for i, codename in enumerate(releases):
+            label = release_label(codename)
+
+            def sub_progress(stage: str, frac: float, i: int = i, label: str = label) -> None:
+                progress("%s：%s" % (label, stage), (i + 0.1 + 0.85 * frac) / n)
+
+            progress("%s：读取软件源索引" % label, i / float(n))
+            if indices is not None and codename in indices:
+                index = indices[codename]
+            else:
+                index = load_index(mirror, cache_dir, suites_for(codename), log=log,
+                                   verify_gpg=verify_gpg)
+            closure = resolve_closure(index, roots)
+            del index
+            # 不要把 RustDesk 自己从镜像里再下载一遍（官方源里也没有）
+            closure = [st for st in closure if st.name != pkg_name]
+            total_mb = sum(int(st.get("Size", "0")) for st in closure) / 1048576.0
+            log("%s 依赖闭包：%d 个软件包，约 %.1f MB" % (label, len(closure), total_mb))
+            _download_debs(mirror, closure, pool, cache_dir, log, sub_progress)
+
+            repo = os.path.join(root, "repos", codename)
+            os.makedirs(repo)
+            texts = [_local_stanza_text(st) for st in closure] + [rustdesk_text]
+            write_local_repo(repo, texts)
+            manifest_releases[codename] = {
+                "version": RELEASES[codename]["version"],
+                "packages": [
+                    {
+                        "name": st.name,
+                        "version": st.version,
+                        "file": "pool/" + os.path.basename(st["Filename"]),
+                        "size": int(st.get("Size", "0")),
+                        "sha256": st.get("SHA256", ""),
+                    }
+                    for st in closure
+                ],
+            }
+
+        _md5, rd_sha, rd_size = _hashes(os.path.join(pool, deb_name))
         manifest = {
             "format": BUNDLE_FORMAT,
             "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "builder": "AutoRustDesk %s" % __version__,
-            "target": dict(TARGET),
+            "arch": ARCH,
             "mirror": mirror,
             "rustdesk": {
                 "package": pkg_name,
                 "version": control.get("Version", ""),
-                "file": "repo/" + deb_name,
+                "file": "pool/" + deb_name,
                 "size": rd_size,
                 "sha256": rd_sha,
             },
             "install_packages": [pkg_name] + extra_packages,
-            "packages": packages,
+            "releases": manifest_releases,
         }
         with open(os.path.join(root, MANIFEST_NAME), "w", encoding="utf-8") as f:
             json.dump(manifest, f, ensure_ascii=False, indent=2)
 
-        progress("打包", 0.95)
+        progress("打包", 0.96)
         output = os.path.abspath(output)
         os.makedirs(os.path.dirname(output) or ".", exist_ok=True)
         tmp_out = output + ".part"
@@ -550,12 +585,13 @@ def _tar_filter(ti: tarfile.TarInfo) -> tarfile.TarInfo:
     return ti
 
 
-def default_output_name(rustdesk_deb: str) -> str:
+def default_output_name(rustdesk_deb: str, releases: Optional[List[str]] = None) -> str:
     try:
         ver = read_deb_control(rustdesk_deb).get("Version", "unknown")
     except Exception:  # noqa: BLE001
         ver = "unknown"
-    return "autorustdesk-bundle-focal-amd64-rustdesk-%s.tar" % ver
+    versions = "-".join(RELEASES[r]["version"] for r in (releases or DEFAULT_RELEASES) if r in RELEASES)
+    return "autorustdesk-bundle-rustdesk-%s-ubuntu-%s.tar" % (ver, versions)
 
 
 def selected_names(stanzas: Iterable[Stanza]) -> Set[str]:

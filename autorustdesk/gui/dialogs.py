@@ -1,7 +1,7 @@
 """对话框：登录、设置、制作离线包、设备列表。"""
 
 import os
-from typing import Optional
+from typing import Dict, List, Optional
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..bundle import DEFAULT_RELEASES, RELEASES
 from ..bundle.builder import DEFAULT_MIRROR, MIRRORS, default_output_name
 from ..core.devices import DeviceRegistry
 from ..core.settings import Settings
@@ -247,8 +248,8 @@ class BundleDialog(QDialog):
         lay = QVBoxLayout(self)
         lay.addWidget(_hint(
             "在能上网的电脑上操作：选择从 RustDesk GitHub Release 页面下载的 "
-            "rustdesk-<版本>-x86_64.deb，程序会从 Ubuntu 20.04 软件源下载它的全部依赖，"
-            "连同虚拟显示驱动一起打成一个离线包。"))
+            "rustdesk-<版本>-x86_64.deb，勾选电脑 B 可能的 Ubuntu 版本，程序会从对应的软件源"
+            "下载全部依赖，连同虚拟显示驱动一起打成一个离线包。每多一个版本，离线包约大 100 MB。"))
         form = QFormLayout()
         self.deb = QLineEdit()
         row = QHBoxLayout()
@@ -257,6 +258,21 @@ class BundleDialog(QDialog):
         b.clicked.connect(self._browse_deb)
         row.addWidget(b)
         form.addRow("RustDesk deb", row)
+        rel_row = QHBoxLayout()
+        self.release_boxes: Dict[str, QCheckBox] = {}
+        for code, info in RELEASES.items():
+            label = "Ubuntu %s" % info["version"]
+            if not info["xorg"]:
+                label += "（部分支持）"
+            box = QCheckBox(label)
+            box.setChecked(code in DEFAULT_RELEASES)
+            if not info["xorg"]:
+                box.setToolTip("只提供 Wayland 桌面：RustDesk 无法控制登录界面，B 没接显示器时也无法使用")
+            box.toggled.connect(self._releases_changed)
+            self.release_boxes[code] = box
+            rel_row.addWidget(box)
+        rel_row.addStretch(1)
+        form.addRow("B 的系统", rel_row)
         self.mirror = QComboBox()
         self.mirror.setEditable(True)
         for name, url in MIRRORS:
@@ -291,6 +307,14 @@ class BundleDialog(QDialog):
         self.close_btn.clicked.connect(self.reject)
         lay.addWidget(buttons)
 
+    def _releases(self) -> List[str]:
+        return [code for code, box in self.release_boxes.items() if box.isChecked()]
+
+    def _releases_changed(self) -> None:
+        deb = self.deb.text().strip()
+        if deb and os.path.isfile(deb) and self._releases():
+            self.out.setText(os.path.join(os.path.dirname(deb), default_output_name(deb, self._releases())))
+
     def _mirror_url(self) -> str:
         data = self.mirror.currentData()
         text = self.mirror.currentText().strip()
@@ -304,7 +328,8 @@ class BundleDialog(QDialog):
         if path:
             self.deb.setText(path)
             if not self.out.text():
-                self.out.setText(os.path.join(os.path.dirname(path), default_output_name(path)))
+                self.out.setText(os.path.join(os.path.dirname(path),
+                                              default_output_name(path, self._releases())))
 
     def _browse_out(self) -> None:
         path, _ = QFileDialog.getSaveFileName(self, "离线包保存为", self.out.text(), "离线包 (*.tar)")
@@ -316,14 +341,18 @@ class BundleDialog(QDialog):
         if not deb or not os.path.isfile(deb):
             QMessageBox.warning(self, "制作离线包", "请先选择 RustDesk 的 deb 安装包")
             return
+        releases = self._releases()
+        if not releases:
+            QMessageBox.warning(self, "制作离线包", "请至少勾选一个 Ubuntu 版本")
+            return
         if not out:
-            out = os.path.join(os.path.dirname(deb), default_output_name(deb))
+            out = os.path.join(os.path.dirname(deb), default_output_name(deb, releases))
             self.out.setText(out)
         self.settings.mirror = self._mirror_url()
         self.start_btn.setEnabled(False)
         self.close_btn.setEnabled(False)
         self.log.clear()
-        self.runner = BundleBuildRunner(deb, out, self.settings.mirror)
+        self.runner = BundleBuildRunner(deb, out, self.settings.mirror, releases)
         self.runner.log_signal.connect(self.log.appendPlainText)
         self.runner.progress_signal.connect(self._progress)
         self.runner.finished_with.connect(self._done)

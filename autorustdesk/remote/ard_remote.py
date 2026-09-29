@@ -46,6 +46,13 @@ DISPLAY_UNIT_NAME = "autorustdesk-display.service"
 DISPLAY_UNIT = "/etc/systemd/system/" + DISPLAY_UNIT_NAME
 GDM_CONFS = ["/etc/gdm3/custom.conf", "/etc/gdm/custom.conf"]
 SLEEP_TARGETS = ["sleep.target", "suspend.target", "hibernate.target", "hybrid-sleep.target"]
+XSESSIONS_DIR = "/usr/share/xsessions"
+# Ubuntu 26.04 起 GNOME 不再提供 Xorg 会话，只能用 Wayland
+WAYLAND_ONLY_RELEASES = ("resolute",)
+WAYLAND_ONLY_WARNING = (
+    "%s 只提供 Wayland 桌面，登录界面和显示设置保持原样：RustDesk 无法控制登录界面，"
+    "B 没接显示器时也无法使用；需要有人在 B 上登录桌面后才能远程，连接时 B 上可能要确认共享屏幕"
+)
 DEFAULT_PORT = 21118
 
 
@@ -182,6 +189,13 @@ def require_root():
 _WAYLAND_COMMENTED = re.compile(r"^\s*#\s*WaylandEnable\s*=", re.I)
 _WAYLAND_LINE = re.compile(r"^\s*WaylandEnable\s*=\s*(\S*)\s*$", re.I)
 _SECTION = re.compile(r"^\s*\[([^\]]+)\]\s*$")
+
+
+def xorg_usable(codename, x11_session_files):
+    """能否让登录界面和桌面改用 Xorg。RustDesk 要靠 Xorg 才能控制登录界面、使用虚拟显示器。"""
+    if codename in WAYLAND_ONLY_RELEASES:
+        return False
+    return bool(x11_session_files)
 
 
 def rustdesk_sees_login_wayland(text):
@@ -573,6 +587,13 @@ def gdm_conf_path():
     return None
 
 
+def x11_sessions():
+    try:
+        return sorted(n for n in os.listdir(XSESSIONS_DIR) if n.endswith(".desktop"))
+    except OSError:
+        return []
+
+
 def display_manager():
     dm = (read_file("/etc/X11/default-display-manager", "") or "").strip()
     return os.path.basename(dm) if dm else ""
@@ -723,6 +744,8 @@ def cmd_probe(args):
             "xorg_conf": os.path.exists("/etc/X11/xorg.conf"),
             "nvidia": os.path.exists("/proc/driver/nvidia"),
             "sessions": sess,
+            "x11_sessions": x11_sessions(),
+            "xorg_usable": xorg_usable(rel.get("VERSION_CODENAME", ""), x11_sessions()),
             "user_sessions": len(graphical_user_sessions(sess)),
             "greeter_sessions": len(greeter_sessions(sess)),
         },
@@ -756,7 +779,10 @@ def _safe_extract(tar_path, dest):
         for m in members:
             m.mode = 0o755 if m.isdir() else 0o644
             m.uid = m.gid = 0
-        tf.extractall(dest, members=members)
+        if hasattr(tarfile, "data_filter"):
+            tf.extractall(dest, members=members, filter="data")
+        else:
+            tf.extractall(dest, members=members)
 
 
 def _find_bundle_root(path):
@@ -793,8 +819,6 @@ def cmd_install(args):
     if arch != "amd64":
         raise ArdError("离线包只支持 x86_64（amd64），B 的架构是 %s" % arch)
     rel = os_release()
-    if rel.get("VERSION_CODENAME") != "focal":
-        log("警告：离线包是为 Ubuntu 20.04 制作的，B 是 %s" % rel.get("PRETTY_NAME", "?"))
 
     bundle = os.path.abspath(args.bundle)
     work = args.workdir or os.path.join(os.path.dirname(bundle), "work")
@@ -815,6 +839,12 @@ def cmd_install(args):
         root = _find_bundle_root(extract_to)
     with open(os.path.join(root, "manifest.json"), "r", encoding="utf-8") as f:
         manifest = json.load(f)
+    target = manifest.get("target", {})
+    codename = rel.get("VERSION_CODENAME", "")
+    if target.get("codename") and codename and target["codename"] != codename:
+        raise ArdError(
+            "离线包里的依赖是给 Ubuntu %s 的，B 是 %s。请在「制作离线包」里勾选 B 的版本后重新制作"
+            % (target.get("release") or target["codename"], rel.get("PRETTY_NAME") or codename))
     repo = os.path.join(root, "repo")
     packages = args.packages or manifest.get("install_packages") or ["rustdesk"]
     want_version = manifest.get("rustdesk", {}).get("version")
@@ -1032,7 +1062,7 @@ def configure_firewall(args, changes):
         log("警告：添加防火墙规则失败：%s" % out.strip())
 
 
-def configure_rustdesk(args, password, changes, warnings):
+def configure_rustdesk(args, password, changes, warnings, xorg_ok=True):
     step("等待 RustDesk 服务就绪")
     rid = wait_rustdesk_ipc(timeout=args.ipc_timeout)
     if not rid:
@@ -1055,6 +1085,9 @@ def configure_rustdesk(args, password, changes, warnings):
         changes.append("RustDesk %s：%s → %s" % (key, old or "（空）", value))
     step("设置 RustDesk 固定密码")
     ok, msg = rd_set_password(password, timeout=args.ipc_timeout)
+    if not ok and not xorg_ok:
+        raise ArdError("RustDesk 没有图形会话，无法设置密码：B 只提供 Wayland 桌面，"
+                       "请先在 B 上接显示器并登录桌面，再重新连接")
     if not ok:
         raise ArdError("设置 RustDesk 密码失败：%s" % msg)
     log("RustDesk 固定密码已设置")
@@ -1079,11 +1112,17 @@ def cmd_configure(args):
     changes = []
     warnings = []
 
+    rel = os_release()
+    xorg_ok = xorg_usable(rel.get("VERSION_CODENAME", ""), x11_sessions())
     step("配置登录界面与显示")
-    display_changed = configure_gdm(state, changes)
-    if args.headless != "skip":
-        changed, _active = configure_headless(args, state, changes)
-        display_changed = display_changed or changed
+    display_changed = False
+    if xorg_ok:
+        display_changed = configure_gdm(state, changes)
+        if args.headless != "skip":
+            changed, _active = configure_headless(args, state, changes)
+            display_changed = display_changed or changed
+    else:
+        warnings.append(WAYLAND_ONLY_WARNING % (rel.get("PRETTY_NAME") or "B 的系统"))
     if args.prevent_sleep:
         configure_sleep(state, changes)
     configure_firewall(args, changes)
@@ -1093,7 +1132,7 @@ def cmd_configure(args):
 
     sess = sessions()
     user_sessions = graphical_user_sessions(sess)
-    need_restart = display_changed or (not greeter_sessions(sess) and not user_sessions)
+    need_restart = xorg_ok and (display_changed or (not greeter_sessions(sess) and not user_sessions))
     restarted = False
     if need_restart and not has_display_manager_unit():
         warnings.append("B 上没有启用显示管理器（display-manager.service），RustDesk 可能没有画面")
@@ -1107,7 +1146,7 @@ def cmd_configure(args):
         elif user_sessions:
             warnings.append("B 上有用户已登录，显示设置要重启登录界面或重启 B 后才生效")
 
-    rid = configure_rustdesk(args, password, changes, warnings)
+    rid = configure_rustdesk(args, password, changes, warnings, xorg_ok)
 
     step("检查 RustDesk 直连端口")
     listening = wait_listening(args.port, timeout=30)

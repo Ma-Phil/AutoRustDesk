@@ -128,3 +128,14 @@ def test_display_unit_points_to_installed_script():
     unit = R.display_unit_text("/usr/bin/python3")
     assert "ExecStart=/usr/bin/python3 %s display-switch --boot" % R.INSTALLED_SCRIPT in unit
     assert "Before=display-manager.service" in unit
+
+
+def test_xorg_usable_by_release_and_sessions():
+    # 20.04/22.04/24.04：有 Xorg 会话，可以改用 Xorg
+    assert R.xorg_usable("focal", ["ubuntu.desktop"])
+    assert R.xorg_usable("noble", ["ubuntu.desktop", "ubuntu-xorg.desktop"])
+    # 26.04：GNOME 不再提供 Xorg 会话，哪怕装了别的 X 桌面也不改登录界面
+    assert not R.xorg_usable("resolute", ["gnome-flashback-metacity.desktop"])
+    # 未知的新版本：看有没有 Xorg 会话
+    assert not R.xorg_usable("zesty-future", [])
+    assert R.xorg_usable("zesty-future", ["xfce.desktop"])
