@@ -222,14 +222,14 @@ autorustdesk-bundle/
 
 | | 安装包 | 说明 |
 |---|---|---|
-| Windows | Inno Setup 安装程序 | 默认装在当前用户目录，不需要管理员权限（也可以选择为所有用户安装）；离线包放在安装目录的 `bundle/` 下 |
+| Windows | Inno Setup 安装程序 | 中文界面（Inno Setup 没带简体中文时用 `packaging/windows/ChineseSimplified.isl`）；默认装在当前用户目录，不需要管理员权限（也可以选择为所有用户安装）；离线包放在安装目录的 `bundle/` 下 |
 | macOS | dmg（arm64、x86_64 各一个） | 离线包在签名前放进 `AutoRustDesk.app/Contents/Resources/bundle/`；dmg 里放本程序、官方的 `RustDesk.app` 和「应用程序」快捷方式 |
 | Ubuntu | deb | 装到 `/opt/autorustdesk`，带应用菜单项、图标、`/usr/bin/autorustdesk`，以及 polkit 策略（授权框显示本程序的说明，授权在一段时间内有效） |
 | Ubuntu | AppImage | 单个文件。以 root 运行网络助手时，pkexec 执行的是 AppImage 文件本身（`$APPIMAGE`）：AppImage 挂载的目录只有当前用户能访问，root 进不去 |
 
 - **Ubuntu 版在 Ubuntu 20.04 的容器里打包**，打出来的程序在 20.04 及以后的版本上都能运行（glibc 向后兼容）。
 - **Npcap 不能打包**：它的许可证不允许随其它软件分发，只能让用户自己装（不装也能用，见 2.3）。
-- **CI**（`.github/workflows/build.yml`）：先用 `packaging/fetch_rustdesk.py` 下载 RustDesk 官方最新正式版（按 GitHub 给出的 SHA256 校验），制作一份 Ubuntu 20.04 / 22.04 / 24.04 的离线包，三个系统的打包任务共用这一份；每个安装包打好后运行自检（`selftest` 报告自带的离线包和客户端；deb 在 Ubuntu 20.04 里真实安装后运行）。推送 `v*` 标签时，把全部安装包、单独的离线包和 `SHA256SUMS.txt` 放进 Release 草稿，人工确认后发布。
+- **CI**（`.github/workflows/build.yml`）：先用 `packaging/fetch_rustdesk.py` 下载 RustDesk 官方最新正式版（按 GitHub 给出的 SHA256 校验），制作一份 Ubuntu 20.04 / 22.04 / 24.04 的离线包，三个系统的打包任务共用这一份；每个安装包打好后按用户的用法验证一遍，运行自检（`selftest` 报告自带的离线包和客户端，找不到就算失败）：Windows 安装程序静默安装后运行装好的程序；dmg 挂载后从里面运行，并检查 RustDesk.app 的官方签名完好；deb 在 Ubuntu 20.04 里真实安装后运行；AppImage 直接运行。推送 `v*` 标签时，把全部安装包、单独的离线包和 `SHA256SUMS.txt` 放进 Release 草稿，人工确认后发布。
 
 ## 7. 测试
 

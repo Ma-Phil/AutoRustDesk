@@ -115,13 +115,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
       - name: 安装 Inno Setup
         run: choco install innosetup -y --no-progress
-      - name: 下载 Inno Setup 简体中文语言文件（非官方翻译；下载不到时安装向导只有英文）
-        shell: bash
-        continue-on-error: true
-        run: >-
-          curl -fsSL --retry 3 -o packaging/windows/ChineseSimplified.isl
-          https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/Unofficial/ChineseSimplified.isl
-      - name: 打包（安装程序）
+      - name: 打包（安装程序；静默安装一遍并运行装好的程序自检）
         shell: bash
         run: python packaging/build.py --bundle extras/*.tar --client extras/rustdesk-*.exe
       - uses: actions/upload-artifact@v4
@@ -166,7 +160,7 @@ jobs:
         run: python packaging/fetch_rustdesk.py "${{ needs.offline-bundle.outputs.rustdesk }}" macos-${{ matrix.arch }} extras
         env:
           GITHUB_TOKEN: ${{ github.token }}
-      - name: 打包（dmg 安装盘）
+      - name: 打包（dmg 安装盘；挂载后从里面运行自检）
         run: python packaging/build.py --bundle extras/*.tar --client extras/rustdesk-*.dmg
       - uses: actions/upload-artifact@v4
         with:

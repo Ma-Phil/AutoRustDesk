@@ -20,6 +20,7 @@ Linux 版请用 packaging/build_linux.sh 和 packaging/linux_packages.py。
 
 import argparse
 import glob
+import json
 import os
 import platform
 import shutil
@@ -57,18 +58,28 @@ def zip_dir(src: str, out: str) -> None:
                 z.write(path, os.path.relpath(path, base))
 
 
-def selftest(exe: str, build: str) -> None:
+def selftest(exe: str, build: str) -> dict:
     """打包后的程序能加载全部模块（界面、SSH、网卡接口），并报告内置资源。"""
     env = dict(os.environ, QT_QPA_PLATFORM="offscreen",
                AUTORUSTDESK_CONFIG_DIR=os.path.join(build, "selftest-config"))
     env.pop("AUTORUSTDESK_RESOURCES", None)
-    run([exe, "selftest"], env=env)
+    print("+", exe, "selftest", flush=True)
+    out = subprocess.run([exe, "selftest"], env=env, stdout=subprocess.PIPE, check=True).stdout
+    text = out.decode("utf-8", "replace")
+    print(text, flush=True)
+    return json.loads(text[text.index("{"):])
+
+
+def check_builtin(info: dict, bundle: str, client: str) -> None:
+    """给了离线包 / RustDesk 客户端时，打包后的程序必须能找到它们。"""
+    if bundle and not info.get("builtin_bundle"):
+        raise SystemExit("打包后的程序没有找到自带的离线包")
+    if client and not info.get("builtin_client"):
+        raise SystemExit("打包后的程序没有找到自带的 RustDesk 客户端")
 
 
 def find_iscc() -> str:
-    found = shutil.which("ISCC") or shutil.which("iscc")
-    if found:
-        return found
+    # 先找安装目录（旁边的 Languages 里有翻译），再找 PATH（可能是 Chocolatey 的转发程序）
     bases = [os.environ.get("ProgramFiles(x86)"), os.environ.get("ProgramFiles"),
              r"C:\Program Files (x86)", r"C:\Program Files"]
     for base in bases:
@@ -76,7 +87,32 @@ def find_iscc() -> str:
             path = os.path.join(base, "Inno Setup 6", "ISCC.exe")
             if os.path.isfile(path):
                 return path
-    return ""
+    return shutil.which("ISCC") or shutil.which("iscc") or ""
+
+
+def chinese_messages(iscc: str) -> str:
+    """安装向导的简体中文文字：Inno Setup 带了就用它的，没带时用我们自己的（只翻译了常见界面）。"""
+    langs = sorted(os.path.basename(p)[:-4]
+                   for p in glob.glob(os.path.join(os.path.dirname(iscc), "Languages", "*.isl")))
+    print("Inno Setup 带的翻译：%s" % ("、".join(langs) or "没有找到"), flush=True)
+    found = os.path.join(os.path.dirname(iscc), "Languages", "ChineseSimplified.isl")
+    if not os.path.isfile(found):
+        found = os.path.join(ROOT, "packaging", "windows", "ChineseSimplified.isl")
+    print("安装向导的中文：%s" % found, flush=True)
+    return found
+
+
+def verify_installer(setup: str, build: str, bundle: str, client: str) -> None:
+    """静默安装到临时目录，运行装好的程序自检，再静默卸载。"""
+    target = os.path.join(build, "install-test")
+    shutil.rmtree(target, ignore_errors=True)
+    run([setup, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CURRENTUSER",
+         "/DIR=%s" % target, "/LOG=%s" % os.path.join(build, "install-test.log")])
+    for name in (APP_NAME + ".exe", "unins000.exe"):
+        if not os.path.isfile(os.path.join(target, name)):
+            raise SystemExit("安装后没有 %s" % name)
+    check_builtin(selftest(os.path.join(target, APP_NAME + "-cli.exe"), build), bundle, client)
+    run([os.path.join(target, "unins000.exe"), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"])
 
 
 def build_windows(dist: str, build: str, bundle: str, client: str) -> str:
@@ -88,15 +124,18 @@ def build_windows(dist: str, build: str, bundle: str, client: str) -> str:
             os.makedirs(os.path.join(folder, sub), exist_ok=True)
             shutil.copy2(src, os.path.join(folder, sub, os.path.basename(src)))
     shutil.copy2(NOTICES, folder)
-    selftest(cli, build)
+    check_builtin(selftest(cli, build), bundle, client)
     run([cli, "bundle", "--help"], stdout=subprocess.DEVNULL)
     iscc = find_iscc()
     if iscc:
         run([iscc, "/Q", "/DAppVersion=%s" % __version__, "/DSourceDir=%s" % folder,
              "/DOutputDir=%s" % dist,
              "/DIconFile=%s" % os.path.join(ROOT, "packaging", "icons", "autorustdesk.ico"),
+             "/DChsFile=%s" % chinese_messages(iscc),
              os.path.join(ROOT, "packaging", "windows", "AutoRustDesk.iss")])
-        return os.path.join(dist, "%s-%s-windows-x64-setup.exe" % (APP_NAME, __version__))
+        setup = os.path.join(dist, "%s-%s-windows-x64-setup.exe" % (APP_NAME, __version__))
+        verify_installer(setup, build, bundle, client)
+        return setup
     print("没有找到 Inno Setup，改为输出 zip（解压后运行 AutoRustDesk.exe）")
     out = os.path.join(dist, "%s-%s-windows-x64.zip" % (APP_NAME, __version__))
     zip_dir(folder, out)
@@ -119,9 +158,27 @@ def copy_rustdesk_app(dmg: str, dest_dir: str) -> None:
         run(["hdiutil", "detach", mnt, "-force"], stdout=subprocess.DEVNULL)
 
 
-def build_macos(dist: str, build: str, client: str) -> str:
+def verify_dmg(dmg: str, build: str, bundle: str, client: str) -> None:
+    """挂载做好的安装盘，从里面运行本程序自检：要能找到自带的离线包和旁边的 RustDesk.app，
+    RustDesk.app 的官方签名要完好（否则用户打不开）。"""
+    mnt = tempfile.mkdtemp(prefix="autorustdesk-dmg-")
+    run(["hdiutil", "attach", "-nobrowse", "-readonly", "-noautoopen", "-mountpoint", mnt, dmg],
+        stdout=subprocess.DEVNULL)
+    try:
+        info = selftest(os.path.join(mnt, APP_NAME + ".app", "Contents", "MacOS", APP_NAME), build)
+        check_builtin(info, bundle, client)
+        if client:
+            if info.get("builtin_client") != "RustDesk":
+                raise SystemExit("安装盘里的程序没有找到旁边的 RustDesk.app")
+            run(["codesign", "--verify", "--deep", "--strict", "--verbose=1",
+                 os.path.join(mnt, "RustDesk.app")])
+    finally:
+        run(["hdiutil", "detach", mnt, "-force"], stdout=subprocess.DEVNULL)
+
+
+def build_macos(dist: str, build: str, bundle: str, client: str) -> str:
     app = os.path.join(dist, APP_NAME + ".app")
-    selftest(os.path.join(app, "Contents", "MacOS", APP_NAME), build)
+    check_builtin(selftest(os.path.join(app, "Contents", "MacOS", APP_NAME), build), bundle, "")
     # 安装盘：本程序 + RustDesk（可选）+"应用程序"快捷方式，两个都拖进去就装好了
     stage = os.path.join(build, "dmg")
     shutil.rmtree(stage, ignore_errors=True)
@@ -146,6 +203,7 @@ def build_macos(dist: str, build: str, client: str) -> str:
             if attempt == 2:
                 raise
             time.sleep(15)
+    verify_dmg(out, build, bundle, client)
     return out
 
 
@@ -172,7 +230,7 @@ def main(argv=None) -> int:
     if sys.platform == "win32":
         out = build_windows(dist, build, args.bundle, args.client)
     else:
-        out = build_macos(dist, build, args.client)
+        out = build_macos(dist, build, args.bundle, args.client)
     shutil.rmtree(os.path.join(build, "selftest-config"), ignore_errors=True)
     print("完成：%s（%.0f MB）" % (out, os.path.getsize(out) / 1048576.0))
     return 0

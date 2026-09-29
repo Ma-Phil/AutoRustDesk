@@ -1,5 +1,6 @@
 ; Windows 安装程序（Inno Setup 6），由 packaging/build.py 调用：
-;   ISCC /DAppVersion=0.2.0 /DSourceDir=dist\AutoRustDesk /DOutputDir=dist /DIconFile=packaging\icons\autorustdesk.ico AutoRustDesk.iss
+;   ISCC /DAppVersion=0.2.0 /DSourceDir=dist\AutoRustDesk /DOutputDir=dist /DIconFile=packaging\icons\autorustdesk.ico
+;        [/DChsFile=简体中文界面文字.isl] AutoRustDesk.iss
 ; 默认装在当前用户目录下，不需要管理员权限；也可以在安装向导里选择为所有用户安装。
 
 #ifndef AppVersion
@@ -18,7 +19,7 @@ DefaultDirName={autopf}\AutoRustDesk
 DefaultGroupName=AutoRustDesk
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
-PrivilegesRequiredOverridesAllowed=dialog
+PrivilegesRequiredOverridesAllowed=commandline dialog
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir={#OutputDir}
@@ -29,14 +30,13 @@ UninstallDisplayIcon={app}\AutoRustDesk.exe
 Compression=lzma2/fast
 SolidCompression=no
 WizardStyle=modern
+; 系统是中文时直接用中文，其它语言的系统先让用户选
+ShowLanguageDialog=auto
 
 [Languages]
-; 简体中文是 Inno Setup 的非官方翻译，不随安装包提供：CI 会下载到本目录（没有时安装向导只有英文）。
-; 先读 Default.isl 再用中文覆盖，翻译里缺的条目用英文补上。
-#if FileExists(AddBackslash(SourcePath) + "ChineseSimplified.isl")
-Name: "chs"; MessagesFile: "compiler:Default.isl,ChineseSimplified.isl"
-#elif FileExists(CompilerPath + "Languages\ChineseSimplified.isl")
-Name: "chs"; MessagesFile: "compiler:Default.isl,compiler:Languages\ChineseSimplified.isl"
+; 先读 Default.isl 再用中文覆盖，中文里没有的条目显示英文
+#ifdef ChsFile
+Name: "chs"; MessagesFile: "compiler:Default.isl,{#ChsFile}"
 #endif
 Name: "en"; MessagesFile: "compiler:Default.isl"
 
