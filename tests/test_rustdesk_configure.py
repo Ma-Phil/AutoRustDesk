@@ -41,6 +41,7 @@ class FakeRustDesk:
         self.next_pid = 5000
         self.kill_server_at = None  # 模拟 --service 在这一刻重启 --server
         self.restarts = 0
+        self.service_dies = False  # RustDesk 服务启动后马上退出（配置里有 stop-service）
 
     # ------------------------------------------------------------ 状态随时间变化
     def _update(self):
@@ -114,6 +115,11 @@ class FakeRustDesk:
 
     def systemctl(self, *args, timeout=60):
         self._update()
+        if args[0] == "is-active":
+            running = self.svc is not None and not self.service_dies
+            return (0, "active\n") if running else (3, "inactive\n")
+        if args[0] == "is-enabled":
+            return 0, "enabled\n"
         if args[:2] in (("restart", "rustdesk"), ("start", "rustdesk")):
             self.restarts += args[0] == "restart"
             self.service_start()
@@ -284,3 +290,83 @@ def test_rustdesk_servers_reads_proc(tmp_path, monkeypatch):
     servers = R.rustdesk_servers(str(tmp_path))
     assert [(s["pid"], round(s["age"], 2)) for s in servers] == [(201, 100.5)]
     assert servers[0]["uid"] == R.os.stat(str(tmp_path / "201")).st_uid
+
+
+# --------------------------------------------------------------------------
+# stop-service 标记：服务启动后马上停止
+# --------------------------------------------------------------------------
+
+STOPPED_TOML = "[options]\nstop-service = 'Y'\ndirect-server = 'Y'\n"
+
+
+def test_clear_stop_service_text():
+    new, changed = R.clear_stop_service_text(STOPPED_TOML)
+    assert changed and new == "[options]\nstop-service = ''\ndirect-server = 'Y'\n"
+    assert R.clear_stop_service_text(new) == (new, False)
+    new, changed = R.clear_stop_service_text('stop-service="Y"\n')
+    assert changed and new == "stop-service=''\n"
+    # 别的选项名里带 stop-service 的、值不是 Y 的都不动
+    other = "[options]\nno-stop-service = 'Y'\nstop-service = 'N'\n"
+    assert R.clear_stop_service_text(other) == (other, False)
+
+
+def test_clear_stop_service_fixes_every_config_and_keeps_backup(tmp_path, monkeypatch):
+    a, b, c = (tmp_path / n / ".config" / "rustdesk" / "RustDesk2.toml" for n in "abc")
+    for f, text in ((a, STOPPED_TOML), (b, STOPPED_TOML), (c, "[options]\ndirect-server = 'Y'\n")):
+        f.parent.mkdir(parents=True)
+        f.write_text(text)
+    monkeypatch.setattr(R, "rustdesk_config_files", lambda: [str(a), str(b), str(c)])
+    changes = []
+    assert R.clear_stop_service(changes) == [str(a), str(b)]
+    assert len(changes) == 2 and str(a) in changes[0]
+    for f in (a, b):
+        assert "stop-service = ''" in f.read_text() and "direct-server = 'Y'" in f.read_text()
+        assert (f.parent / "RustDesk2.toml.autorustdesk.bak").read_text() == STOPPED_TOML
+    assert c.read_text() == "[options]\ndirect-server = 'Y'\n"
+    assert R.clear_stop_service([]) == []
+
+
+def test_ensure_service_reports_service_that_stops_right_away(rustdesk, monkeypatch):
+    m = rustdesk()
+    m.service_start()
+    m.service_dies = True
+    monkeypatch.setattr(R, "rustdesk_service_log",
+                        lambda lines=10: "17:50:35 Started RustDesk.\n17:50:35 Stopping RustDesk...")
+    monkeypatch.setattr(R, "rustdesk_config_files", lambda: [])
+    with pytest.raises(R.ArdError) as e:
+        R.ensure_rustdesk_service()
+    assert "启动后马上停止" in str(e.value) and "inactive" in str(e.value)
+    assert "Stopping RustDesk..." in str(e.value)
+
+
+def test_configure_distinguishes_stopped_service_from_missing_session(rustdesk, monkeypatch):
+    m = rustdesk(server_delay=None)
+    m.service_start()
+    m.service_dies = True
+    monkeypatch.setattr(R, "rustdesk_service_log", lambda lines=10: "")
+    monkeypatch.setattr(R, "rustdesk_config_files", lambda: [])
+    with pytest.raises(R.ArdError, match="服务没有在运行") as e:
+        R.configure_rustdesk(args(), PASSWORD, [])
+    assert "没有登录界面" not in str(e.value)
+
+
+def test_ensure_service_fails_when_systemctl_fails(rustdesk, monkeypatch):
+    m = rustdesk()
+    real = m.systemctl
+
+    def failing(*a, timeout=60):
+        if a[0] == "start":
+            return 1, "Failed to start rustdesk.service: Unit is masked."
+        return real(*a, timeout=timeout)
+
+    monkeypatch.setattr(R, "systemctl", failing)
+    monkeypatch.setattr(R, "rustdesk_service_log", lambda lines=10: "")
+    monkeypatch.setattr(R, "rustdesk_config_files", lambda: [])
+    with pytest.raises(R.ArdError, match="masked"):
+        R.ensure_rustdesk_service()
+
+
+def test_ensure_service_ok_when_it_keeps_running(rustdesk):
+    m = rustdesk()
+    R.ensure_rustdesk_service()
+    assert m.svc is not None

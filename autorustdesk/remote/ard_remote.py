@@ -56,6 +56,8 @@ WAYLAND_ONLY_WARNING = (
 DEFAULT_PORT = 21118
 # RustDesk 的 --server 进程运行满这么多秒后才写设置，见 wait_rustdesk_server()
 SERVER_SETTLE_SECONDS = 5
+# RustDesk 服务启动后要持续运行这么多秒才算启动成功
+SERVICE_STABLE_SECONDS = 3
 
 
 class ArdError(Exception):
@@ -766,15 +768,109 @@ def rustdesk_status(port=DEFAULT_PORT, with_options=True):
     return info
 
 
-def ensure_rustdesk_service():
+_STOP_SERVICE = re.compile(r"^(\s*stop-service\s*=\s*)(['\"])Y\2([ \t]*)$", re.M)
+
+
+def clear_stop_service_text(text):
+    """把配置文件里的 stop-service = 'Y' 改成 ''，返回 (新内容, 是否改动)。"""
+    new, n = _STOP_SERVICE.subn(lambda m: m.group(1) + "''" + m.group(3), text)
+    return new, n > 0
+
+
+def rustdesk_config_files():
+    """root 和所有用户（包括登录界面的 gdm）已有的 RustDesk2.toml。"""
+    homes = ["/root"]
+    try:
+        import pwd  # 只在 Linux 上有；本文件在其它系统上也会被单元测试导入
+
+        homes += [e.pw_dir for e in pwd.getpwall() if e.pw_dir]
+    except ImportError:
+        pass
+    paths = []
+    for home in homes:
+        path = os.path.join(home, ".config", "rustdesk", "RustDesk2.toml")
+        if path not in paths and os.path.isfile(path):
+            paths.append(path)
+    return paths
+
+
+def _rewrite_keep_owner(path, content):
+    """改写用户的配置文件，保持原来的所有者和权限（write_file 会换成 root 的新文件）。"""
+    st = os.stat(path)
+    tmp = path + ".ard-tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(content)
+    os.chmod(tmp, st.st_mode & 0o7777)
+    if hasattr(os, "chown"):
+        os.chown(tmp, st.st_uid, st.st_gid)
+    os.replace(tmp, path)
+
+
+def clear_stop_service(changes):
+    """清除配置里的 stop-service 标记，返回改过的文件。
+
+    在 RustDesk 界面里点过“停止服务”后配置里会留下这个标记：之后 RustDesk 服务一启动就
+    自己退出（systemd 日志里是 Started 后 0.2 秒 Stopping），--server 也不会启动。
+    """
+    fixed = []
+    for path in rustdesk_config_files():
+        text = read_file(path)
+        if text is None:
+            continue
+        new, changed = clear_stop_service_text(text)
+        if not changed:
+            continue
+        backup_once(path)
+        _rewrite_keep_owner(path, new)
+        fixed.append(path)
+        changes.append("清除 RustDesk 的“停止服务”标记（%s：stop-service）" % path)
+    return fixed
+
+
+def rustdesk_service_log(lines=10):
+    rc, out = run(["journalctl", "-u", "rustdesk", "-n", str(lines), "--no-pager",
+                   "-o", "short-precise"], timeout=15)
+    return out.strip() if rc == 0 else ""
+
+
+def service_stopped_message(what):
+    """RustDesk 服务没在运行时的错误说明：当时的服务状态、最近的日志，以及仍有停止标记的配置。"""
+    active, enabled = unit_state("rustdesk")
+    msg = "%s（服务状态：%s，开机自启：%s）" % (what, active or "未知", enabled or "未知")
+    flagged = []
+    for path in rustdesk_config_files():
+        if _STOP_SERVICE.search(read_file(path, "") or ""):
+            flagged.append(path)
+    if flagged:
+        msg += "\n这些配置里还有 stop-service = 'Y'：%s" % "、".join(flagged)
+    tail = rustdesk_service_log()
+    if tail:
+        msg += "\n最近的服务日志：\n" + "\n".join("  " + ln for ln in tail.splitlines())
+    return msg
+
+
+def wait_service_stable(seconds=SERVICE_STABLE_SECONDS):
+    """RustDesk 服务启动后要持续运行一会儿才算启动成功；马上退出就报错，不再往下等。"""
+    for _ in range(seconds):
+        time.sleep(1)
+        if unit_state("rustdesk")[0] != "active":
+            raise ArdError(service_stopped_message("RustDesk 服务启动后马上停止了"))
+
+
+def ensure_rustdesk_service(restart=False):
     active, enabled = unit_state("rustdesk")
     if enabled not in ("enabled", "static"):
         systemctl("daemon-reload")
-        systemctl("enable", "rustdesk")
+        rc, out = systemctl("enable", "rustdesk")
+        if rc != 0:
+            raise ArdError("设置 RustDesk 服务开机自启失败：%s" % out.strip())
         log("已设置 RustDesk 服务开机自启")
-    if active != "active":
-        systemctl("start", "rustdesk")
+    if active != "active" or restart:
+        rc, out = systemctl("restart" if active == "active" else "start", "rustdesk")
+        if rc != 0:
+            raise ArdError(service_stopped_message("启动 RustDesk 服务失败：%s" % out.strip()))
         log("已启动 RustDesk 服务")
+    wait_service_stable()
 
 
 # ---------------------------------------------------------------------------
@@ -955,7 +1051,9 @@ def cmd_install(args):
         raise ArdError("RustDesk 版本不符：期望 %s，实际 %s" % (want_version, after["rustdesk"]))
 
     step("启动 RustDesk 服务")
-    ensure_rustdesk_service()
+    # 服务已经在运行时，它内存里的配置还带着停止标记，清除后要重启才生效
+    stop_cleared = bool(clear_stop_service(changes))
+    ensure_rustdesk_service(restart=stop_cleared)
     if not args.keep:
         shutil.rmtree(os.path.join(work, "bundle"), ignore_errors=True)
     return {"ok": True, "before": before, "after": after,
@@ -1197,6 +1295,8 @@ def configure_rustdesk(args, password, changes, xorg_ok=True):
             log("重启 RustDesk 服务后重新写入设置")
             systemctl("restart", "rustdesk")
         servers = wait_rustdesk_server(timeout=args.ipc_timeout)
+        if not servers and unit_state("rustdesk")[0] != "active":
+            raise ArdError(service_stopped_message("RustDesk 服务没有在运行，无法设置"))
         if attempt == 0:
             if servers:
                 log("RustDesk 服务已就绪（--server 以 %s 身份运行）" % describe_servers(servers))
