@@ -40,6 +40,11 @@ STEPS: List[Tuple[str, str]] = [
 ]
 STEP_TITLES = dict(STEPS)
 
+# 快速连接时，先用已经记住的地址试探 B，最多试这么多秒；连不上再走完整的发现流程
+QUICK_PROBE_SECONDS = 3
+# 连上记住的地址后，等链路监听确认这个地址确实是同一台设备，最多等这么多秒
+QUICK_VERIFY_SECONDS = 1.5
+
 PENDING, RUNNING, DONE, SKIPPED, FAILED, WARNING = (
     "pending", "running", "done", "skipped", "failed", "warning")
 
@@ -334,8 +339,12 @@ class Workflow:
             current = "network"
             self._run_step("network", self.step_network)
             current = "discover"
-            self._run_step("discover", self.step_discover)
-            quick_ok = mode == "quick" and self._quick_ready()
+            direct = mode == "quick" and self._quick_direct()
+            if direct:
+                self.ui.step("discover", SKIPPED, "已记住的地址 %s 可以直接连接" % self.link_ip)
+            else:
+                self._run_step("discover", self.step_discover)
+            quick_ok = bool(direct) or (mode == "quick" and self._quick_ready())
             if quick_ok:
                 for s in ("login", "probe", "install", "configure"):
                     self.ui.step(s, SKIPPED, "已配置过，直接连接")
@@ -612,6 +621,66 @@ class Workflow:
                 if tcp_open(ip, port, 1):
                     return ip
         return ""
+
+    def _quick_direct(self) -> bool:
+        """快速连接：不等 B 来要地址，直接试探上次记住的地址。
+
+        B 的地址是本程序的 DHCP 按 MAC 固定分配的，B 通常还保留着上次的地址。试探通了就
+        不用再发现 B（也不用等 DHCP、拔插网口）。不通、链路上不止一台设备、或者这个地址现在
+        是另一台设备时返回 False，回到完整的发现流程。
+        """
+        if self.net is None:
+            return False
+        port = self.settings.rustdesk_port
+        known = []
+        for dev in self.registry.all():
+            if not (dev.rustdesk_password and dev.configured_at and dev.ip):
+                continue
+            try:
+                if ipaddress.ip_address(dev.ip) in self.net:
+                    known.append(dev)
+            except ValueError:
+                continue
+        if not known:
+            return False
+        self.ui.log("先试探已记住的地址：%s" % "、".join("%s（%s）" % (d.ip, d.title) for d in known))
+        deadline = time.time() + QUICK_PROBE_SECONDS
+        while True:
+            self._check_cancel()
+            # 直连链路往返不到 1 毫秒，1 秒超时足够
+            reachable = [d for d in known if tcp_open(d.ip, port, 1)]
+            if len(reachable) > 1:
+                self.ui.log("链路上有多个记住的地址都能连上，改用完整的发现流程确认是哪一台", "warning")
+                return False
+            if reachable:
+                dev = reachable[0]
+                if not self._same_device(dev):
+                    return False
+                self.mac, self.ssh_host, self.link_ip = dev.mac, dev.ip, dev.ip
+                self.password = dev.rustdesk_password
+                self.registry.update(dev.mac, last_seen=now_str())
+                self.ui.device(self._device_info())
+                self.ui.log("已记住的地址 %s（%s）可以直接连接，跳过发现" % (dev.ip, dev.title))
+                return True
+            if time.time() >= deadline:
+                self.ui.log("已记住的地址暂时连不上，按完整流程重新发现 B", "debug")
+                return False
+            self._sleep(0.5)
+
+    def _same_device(self, dev) -> bool:
+        """链路监听看到过这个地址的 MAC 时核对一下；没看到就当作是同一台。"""
+        end = time.time() + QUICK_VERIFY_SECONDS
+        while True:
+            for c in self.discovery.snapshot():
+                if dev.ip == c.lease_ip or dev.ip in c.ipv4:
+                    if c.mac.lower() == dev.mac.lower():
+                        return True
+                    self.ui.log("地址 %s 现在属于另一台设备（%s），不是 %s（%s），改用完整的发现流程" % (
+                        dev.ip, c.mac, dev.title, dev.mac), "warning")
+                    return False
+            if time.time() >= end:
+                return True
+            self._sleep(0.2)
 
     def _quick_ready(self) -> bool:
         dev = self.registry.get(self.mac)
